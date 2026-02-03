@@ -1,0 +1,117 @@
+# Backtesting Configuration
+# Defines all backtesting parameters
+
+backtest:
+  # Date range
+  start_date: "2018-01-01"
+  end_date: "2024-12-31"
+
+  # Capital
+  initial_capital: 100_000_000  # 100M KRW
+
+  # Rebalancing
+  rebalancing:
+    frequency: weekly  # Options: daily, weekly, monthly
+    day_of_week: monday  # For weekly: monday, tuesday, etc.
+    day_of_month: 1      # For monthly: 1-28
+
+  # Execution assumptions
+  execution:
+    lag_days: 1           # Use T-1 data to trade at T
+    execution_price: open  # Options: open, close, vwap
+    market_open_time: "09:00"
+    market_close_time: "15:30"
+
+  # Transaction costs
+  costs:
+    transaction_fee_bps: 15    # 15 bps round-trip
+    slippage_bps: 5            # Base slippage
+    slippage_volume_impact: true  # Additional slippage based on volume
+    slippage_impact_coef: 0.1     # Coefficient for volume impact
+
+  # Portfolio construction
+  portfolio:
+    allocation_method: topk  # Options: topk, softmax, zscore, optimization
+    topk: 20                 # Number of positions for topk
+    softmax_temperature: 1.0 # Temperature for softmax
+    zscore_cap: 2.0          # Cap for zscore method
+    max_weight_per_asset: 0.1  # Maximum 10% per position
+    min_weight_per_asset: 0.01 # Minimum 1% per position
+    max_leverage: 1.0        # No leverage
+    long_only: true          # Long-only constraint
+
+  # Risk management
+  risk:
+    beta_hedge_enabled: true
+    target_beta: 0.0  # Market neutral
+    hedge_instruments:
+      - "252670 KS Equity"  # KODEX 200 Inverse 2X
+
+    volatility_target:
+      enabled: true
+      target_vol: 0.15  # 15% annualized
+      lookback_days: 20
+      scale_factor_min: 0.5
+      scale_factor_max: 1.5
+
+    drawdown_control:
+      enabled: true
+      max_drawdown: 0.15  # 15% max drawdown trigger
+      recovery_threshold: 0.05  # Resume when DD recovers to 5%
+      scale_factor: 0.5   # Scale positions by this factor when triggered
+
+# Walk-forward configuration
+walkforward:
+  enabled: true
+  train_period_months: 24  # 2 years training
+  test_period_months: 6    # 6 months testing
+  retrain_frequency: quarterly  # Options: monthly, quarterly, yearly
+  purge_days: 21           # Purging between train/test
+  embargo_days: 5          # Embargo after test start
+
+# Model configurations for backtesting
+models:
+  # Alpha models to use
+  alphas:
+    - name: momentum
+      enabled: true
+      weight: 0.25
+
+    - name: value
+      enabled: true
+      weight: 0.25
+
+    - name: volatility
+      enabled: true
+      weight: 0.25
+
+    - name: microstructure
+      enabled: true
+      weight: 0.25
+
+  # Neural network models
+  neural_networks:
+    - name: momentum_nn
+      enabled: true
+
+    - name: value_nn
+      enabled: true
+
+    - name: regime_nn
+      enabled: true
+
+  # Ensemble method
+  ensemble:
+    method: moe  # Options: stacking, moe, metalabel, simple_average
+    moe_config:
+      n_regimes: 3
+      regime_model: regime_nn
+      smoothing_alpha: 0.2  # Regime probability smoothing
+
+# Reporting
+reporting:
+  output_dir: "data/reports"
+  generate_plots: true
+  save_trades: true
+  save_holdings: true
+  save_signals: true

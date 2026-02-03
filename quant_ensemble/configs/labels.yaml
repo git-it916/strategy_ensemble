@@ -1,0 +1,51 @@
+# Label Generation Configuration
+# Defines target labels for supervised learning
+
+labels:
+  # Regression target
+  regression:
+    name: forward_return
+    description: "Forward return over horizon"
+    horizon_days: 21  # ~1 month forward return
+    return_type: simple  # Options: simple, log
+    excess_return: true  # Subtract market return
+    benchmark: "KOSPI2 Index"
+
+  # Classification target
+  classification:
+    name: quantile_class
+    description: "Quantile classification"
+    n_quantiles: 5  # Quintiles
+    top_quantile_positive: true  # Top quantile = 1, others = 0
+    multi_class: false  # If true, use all quantile labels
+
+  # Ranking target
+  ranking:
+    name: cross_sectional_rank
+    description: "Cross-sectional rank"
+    ascending: false  # Higher return = higher rank
+
+  # Sample weighting
+  weighting:
+    method: inverse_variance  # Options: uniform, inverse_variance, return_magnitude
+    min_weight: 0.1
+    max_weight: 10.0
+    decay_halflife: null  # Days for exponential decay (null = no decay)
+
+  # Purging configuration (anti-leakage)
+  purging:
+    enabled: true
+    horizon_days: 21  # Must match regression horizon
+    buffer_days: 5    # Additional buffer
+
+  # Embargo configuration (anti-leakage)
+  embargo:
+    enabled: true
+    pct_of_test: 0.01  # 1% of test set as embargo
+    min_days: 5        # Minimum embargo days
+
+# Label quality filters
+quality_filters:
+  min_return: -0.5     # Filter extreme negative returns (likely errors)
+  max_return: 1.0      # Filter extreme positive returns (likely corporate actions)
+  require_full_horizon: true  # Require complete forward horizon data

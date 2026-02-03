@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(for dir in data/raw data/processed data/feature_store data/labels data/artifacts data/reports)",
+      "Bash(do touch \"$dir/.gitkeep\")",
+      "Bash(done)",
+      "Bash(cd:*)",
+      "Bash(pip show:*)",
+      "Bash(\"C:\\\\Users\\\\Bloomberg\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python314\\\\python.exe\":*)",
+      "Bash(\"C:\\\\Users\\\\Bloomberg\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python314\\\\python.exe\" -m pip install loguru pandas numpy scikit-learn)",
+      "Bash(\"C:\\\\Users\\\\Bloomberg\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python314\\\\python.exe\" -m pip install pydantic)",
+      "Bash(\"C:\\\\Users\\\\Bloomberg\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe\" -m pip install pandas numpy pyyaml pyarrow)",
+      "Bash(\"C:\\\\Users\\\\Bloomberg\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe\":*)"
+    ]
+  }
+}

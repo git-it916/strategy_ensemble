@@ -1,0 +1,92 @@
+# Universe Configuration
+# Defines the tradeable universe for the ensemble system
+
+universe:
+  # Stock indices for universe filtering
+  stock_indices:
+    - KOSPI
+    - KOSDAQ
+
+  # Bloomberg tickers for benchmarks
+  benchmarks:
+    kospi200: "KOSPI2 Index"
+    kospi: "KOSPI Index"
+    kosdaq: "KOSDAQ Index"
+
+  # ETFs for trading and hedging
+  etfs:
+    # Index tracking ETFs
+    - ticker: "069500 KS Equity"  # KODEX 200
+      name: "KODEX 200"
+      type: index
+      underlying: "KOSPI2 Index"
+
+    - ticker: "229200 KS Equity"  # KODEX KOSDAQ 150
+      name: "KODEX KOSDAQ150"
+      type: index
+      underlying: "KOSDAQ Index"
+
+    # Inverse/Leveraged ETFs for hedging
+    - ticker: "252670 KS Equity"  # KODEX 200선물인버스2X
+      name: "KODEX 200 Inverse 2X"
+      type: inverse_leverage
+      leverage: -2
+      underlying: "069500 KS Equity"
+
+    - ticker: "251340 KS Equity"  # KODEX 코스닥150선물인버스
+      name: "KODEX KOSDAQ150 Inverse"
+      type: inverse
+      leverage: -1
+      underlying: "229200 KS Equity"
+
+    - ticker: "122630 KS Equity"  # KODEX 레버리지
+      name: "KODEX Leverage"
+      type: leverage
+      leverage: 2
+      underlying: "069500 KS Equity"
+
+  # Universe filtering criteria
+  filters:
+    min_market_cap_krw: 100_000_000_000  # 100B KRW minimum market cap
+    min_adv_krw: 1_000_000_000           # 1B KRW minimum average daily volume
+    min_price_krw: 1000                   # Minimum stock price
+    min_trading_days: 60                  # Minimum trading days in lookback
+
+  # Exclusion criteria
+  exclusions:
+    - SPAC
+    - administrative_issue
+    - trading_halt
+    - delisting_warning
+
+# Bloomberg data fields
+bloomberg:
+  # Price data fields
+  price_fields:
+    - PX_LAST
+    - PX_OPEN
+    - PX_HIGH
+    - PX_LOW
+    - PX_VOLUME
+    - TURNOVER
+    - VWAP
+
+  # Fundamental data fields
+  fundamental_fields:
+    - PX_TO_BOOK_RATIO
+    - PE_RATIO
+    - DVD_PAYOUT_RATIO
+    - RETURN_COM_EQY
+    - TOT_DEBT_TO_TOT_EQY
+    - CUR_MKT_CAP
+    - EQY_SH_OUT
+
+  # Flow data fields
+  flow_fields:
+    - EQY_INST_PCT_SH_OUT
+    - EQY_FOREIGN_PCT_SH_OUT
+
+  # Index constituents
+  index_members:
+    kospi200: "KOSPI2 Index"
+    kosdaq150: "KOSDQ150 Index"
