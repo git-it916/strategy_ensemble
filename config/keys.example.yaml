@@ -1,0 +1,24 @@
+# API Keys Configuration
+# IMPORTANT: Copy this to keys.yaml and fill in your actual keys
+# NEVER commit keys.yaml to Git!
+
+# 한국투자증권 API
+kis:
+  app_key: "YOUR_KIS_APP_KEY"
+  app_secret: "YOUR_KIS_APP_SECRET"
+  account_number: "00000000-00"  # 계좌번호
+  is_paper: true  # 모의투자 여부
+
+# Bloomberg API (optional)
+bloomberg:
+  host: "localhost"
+  port: 8194
+
+# Slack Webhook
+slack:
+  webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+  channel: "#trading-alerts"
+
+# Database
+database:
+  duckdb_path: "data/quant.duckdb"

@@ -205,3 +205,40 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ===========================================
+# Project-specific ignores
+# ===========================================
+
+# API Keys and secrets (IMPORTANT!)
+config/keys.yaml
+*.pem
+*.key
+
+# Data files
+data/
+*.parquet
+*.duckdb
+*.duckdb.wal
+
+# Model weights
+models/weights/
+*.pkl
+
+# Logs
+logs/
+*.log
+
+# Reports and outputs
+reports/
+backtest_results/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
