@@ -6,11 +6,6 @@
 
 이 시스템은 시장 레짐(국면)을 감지하고, 각 레짐에 최적화된 알파 전략을 선택/가중하여 포트폴리오를 구성합니다.
 
-### 가상환경 설정 
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-.\.venv\Scripts\Activate.ps1
-
-
 ### Key Features
 
 - **Regime Detection**: HMM/GMM 기반 시장 국면 분류
@@ -58,6 +53,10 @@ cd strategy_ensemble
 python -m venv venv
 source venv/bin/activate  # Linux/Mac
 venv\Scripts\activate     # Windows
+
+### 가상환경 설정 
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+.\.venv\Scripts\Activate.ps1
 
 # Install dependencies
 pip install -r requirements.txt
