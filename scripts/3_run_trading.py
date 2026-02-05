@@ -99,20 +99,26 @@ def initialize_broker(keys: dict, is_paper: bool = True):
 
 
 def initialize_notifier(keys: dict):
-    """Initialize Slack notifier."""
-    from src.execution import SlackNotifier
+    """Initialize Telegram notifier."""
+    from src.execution import TelegramNotifier
 
-    slack_keys = keys.get("slack", {})
-    webhook_url = slack_keys.get("webhook_url", "")
+    telegram_keys = keys.get("telegram", {})
+    bot_token = telegram_keys.get("bot_token", "")
+    chat_id = telegram_keys.get("chat_id", "")
 
-    if not webhook_url or "YOUR" in webhook_url:
-        logger.warning("Slack webhook not configured")
+    if not bot_token or not chat_id or "YOUR" in bot_token:
+        logger.warning("Telegram not configured")
         return None
 
-    return SlackNotifier(
-        webhook_url=webhook_url,
-        channel=slack_keys.get("channel"),
+    notifier = TelegramNotifier(
+        bot_token=bot_token,
+        chat_id=chat_id,
     )
+
+    # Send startup notification
+    notifier.send_startup()
+
+    return notifier
 
 
 def run_trading_cycle(

@@ -6,7 +6,7 @@ Order execution and trading infrastructure.
 
 from .kis_api import KISApi, KISAuth
 from .order_manager import OrderManager, Order, OrderStatus
-from .slack_bot import SlackNotifier
+from .telegram_bot import TelegramNotifier
 
 __all__ = [
     "KISApi",
@@ -14,5 +14,5 @@ __all__ = [
     "OrderManager",
     "Order",
     "OrderStatus",
-    "SlackNotifier",
+    "TelegramNotifier",
 ]

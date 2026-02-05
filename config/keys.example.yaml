@@ -14,10 +14,15 @@ bloomberg:
   host: "localhost"
   port: 8194
 
-# Slack Webhook
+# Slack Webhook (optional)
 slack:
   webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
   channel: "#trading-alerts"
+
+# Telegram Bot
+telegram:
+  bot_token: "YOUR_BOT_TOKEN"
+  chat_id: "YOUR_CHAT_ID"
 
 # Database
 database:
