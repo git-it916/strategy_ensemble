@@ -11,6 +11,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 import logging
+import time
 
 import pandas as pd
 
@@ -38,6 +39,7 @@ class Order:
     quantity: int
     price: int | None
     order_type: str = "limit"  # "limit" or "market"
+    krx_fwdg_ord_orgno: str | None = None
     status: OrderStatus = OrderStatus.PENDING
     filled_qty: int = 0
     filled_price: float = 0
@@ -56,7 +58,7 @@ class OrderManager:
         - Slippage tracking
     """
 
-    def __init__(self, api: KISApi):
+    def __init__(self, api: KISApi, notifier: Any | None = None):
         """
         Initialize order manager.
 
@@ -64,6 +66,7 @@ class OrderManager:
             api: KIS API instance
         """
         self.api = api
+        self.notifier = notifier
         self._pending_orders: dict[str, Order] = {}
         self._order_history: list[Order] = []
 
@@ -98,6 +101,10 @@ class OrderManager:
         quantity: int,
         price: int | None = None,
         order_type: str = "limit",
+        excg_id_dvsn_cd: str | None = None,
+        sll_type: str = "",
+        cndt_pric: str = "",
+        notify_on_submit: bool = False,
     ) -> Order:
         """
         Submit an order.
@@ -124,26 +131,46 @@ class OrderManager:
 
         try:
             # Submit to broker
+            order_type_code = "00" if order_type == "limit" else "01"
             if side.upper() == "BUY":
                 result = self.api.buy_stock(
                     stock_code=stock_code,
                     quantity=quantity,
                     price=price,
-                    order_type="00" if order_type == "limit" else "01",
+                    order_type=order_type_code,
+                    excg_id_dvsn_cd=excg_id_dvsn_cd,
+                    sll_type=sll_type,
+                    cndt_pric=cndt_pric,
                 )
             else:
                 result = self.api.sell_stock(
                     stock_code=stock_code,
                     quantity=quantity,
                     price=price,
-                    order_type="00" if order_type == "limit" else "01",
+                    order_type=order_type_code,
+                    excg_id_dvsn_cd=excg_id_dvsn_cd,
+                    sll_type=sll_type,
+                    cndt_pric=cndt_pric,
                 )
 
             order.order_id = result.get("order_no", order.order_id)
+            order.krx_fwdg_ord_orgno = result.get("krx_fwdg_ord_orgno")
             order.status = OrderStatus.SUBMITTED
 
             self._pending_orders[order.order_id] = order
             logger.info(f"Order submitted: {order}")
+
+            if notify_on_submit and self.notifier:
+                try:
+                    self.notifier.send_order_submitted(
+                        stock_code=order.stock_code,
+                        stock_name=order.stock_code,
+                        side=order.side,
+                        quantity=order.quantity,
+                        order_type=order.order_type,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send order notification: {e}")
 
         except Exception as e:
             order.status = OrderStatus.REJECTED
@@ -172,6 +199,8 @@ class OrderManager:
                 order_no=order_id,
                 stock_code=order.stock_code,
                 quantity=order.quantity - order.filled_qty,
+                order_type="00" if order.order_type == "limit" else "01",
+                krx_fwdg_ord_orgno=order.krx_fwdg_ord_orgno or "",
             )
 
             order.status = OrderStatus.CANCELLED
@@ -186,8 +215,9 @@ class OrderManager:
             logger.error(f"Cancel failed: {e}")
             return False
 
-    def sync_orders(self) -> None:
+    def sync_orders(self) -> list[Order]:
         """Synchronize order status with broker."""
+        filled_orders: list[Order] = []
         try:
             broker_orders = self.api.get_orders()
 
@@ -205,17 +235,82 @@ class OrderManager:
                         order.status = OrderStatus.FILLED
                         del self._pending_orders[order_id]
                         self._order_history.append(order)
+                        filled_orders.append(order)
 
                     elif order.filled_qty > 0:
                         order.status = OrderStatus.PARTIAL
 
         except Exception as e:
             logger.error(f"Order sync failed: {e}")
+        return filled_orders
+
+    def _notify_fill(self, order: Order, notifier: Any | None = None) -> None:
+        notifier = notifier or self.notifier
+        if not notifier:
+            return
+
+        fill_price = order.filled_price or order.price or 0
+        try:
+            if hasattr(notifier, "send_fill_alert"):
+                notifier.send_fill_alert(
+                    stock_code=order.stock_code,
+                    stock_name=order.stock_code,
+                    side=order.side,
+                    quantity=order.filled_qty or order.quantity,
+                    price=fill_price,
+                )
+            else:
+                notifier.send_trade_alert(
+                    stock_code=order.stock_code,
+                    stock_name=order.stock_code,
+                    side=order.side,
+                    quantity=order.filled_qty or order.quantity,
+                    price=fill_price,
+                    strategy="Ensemble",
+                )
+        except Exception as e:
+            logger.warning(f"Failed to send fill notification: {e}")
+
+    def wait_for_fills(
+        self,
+        orders: list[Order],
+        timeout_seconds: int = 120,
+        poll_interval: float = 2.0,
+        notifier: Any | None = None,
+    ) -> list[Order]:
+        """Wait for orders to be filled and send notifications."""
+        pending_ids = {
+            order.order_id
+            for order in orders
+            if order.status in {OrderStatus.SUBMITTED, OrderStatus.PARTIAL}
+        }
+        if not pending_ids:
+            return []
+
+        end_time = time.time() + timeout_seconds
+        while pending_ids and time.time() < end_time:
+            filled_orders = self.sync_orders()
+            for order in filled_orders:
+                if order.order_id in pending_ids:
+                    pending_ids.remove(order.order_id)
+                    self._notify_fill(order, notifier)
+
+            if pending_ids:
+                time.sleep(poll_interval)
+
+        return [order for order in orders if order.order_id in pending_ids]
 
     def execute_rebalance(
         self,
         target_weights: pd.DataFrame,
         total_value: int | None = None,
+        order_type: str = "limit",
+        sell_first: bool = True,
+        wait_for_fills: bool = False,
+        timeout_seconds: int = 120,
+        poll_interval: float = 2.0,
+        notifier: Any | None = None,
+        notify_on_submit: bool = False,
     ) -> list[Order]:
         """
         Execute rebalancing to target weights.
@@ -223,10 +318,24 @@ class OrderManager:
         Args:
             target_weights: DataFrame with asset_id, weight
             total_value: Total portfolio value (auto-calculated if None)
+            order_type: "limit" or "market"
+            sell_first: Place sell orders before buy orders
+            wait_for_fills: Wait for fills and optionally notify
+            timeout_seconds: Max wait time per batch
+            poll_interval: Poll interval for order status
+            notifier: Optional Telegram notifier
+            notify_on_submit: Send notifications when orders are submitted
 
         Returns:
             List of orders placed
         """
+        # Normalize order type
+        order_type_normalized = str(order_type).lower()
+        if order_type_normalized in {"01", "market", "mkt"}:
+            order_type_normalized = "market"
+        else:
+            order_type_normalized = "limit"
+
         # Get current positions
         positions = self.get_positions()
         cash = self.get_cash()
@@ -242,9 +351,22 @@ class OrderManager:
         for _, row in positions.iterrows():
             current_weights[row["stock_code"]] = row["eval_amount"] / total_value
 
-        # Calculate trades needed
-        orders = []
+        sell_specs: list[dict[str, Any]] = []
+        buy_specs: list[dict[str, Any]] = []
 
+        def add_spec(stock_code: str, side: str, quantity: int, price: int) -> None:
+            spec = {
+                "stock_code": stock_code,
+                "side": side,
+                "quantity": quantity,
+                "price": price,
+            }
+            if side == "SELL":
+                sell_specs.append(spec)
+            else:
+                buy_specs.append(spec)
+
+        # Calculate trades needed
         for _, row in target_weights.iterrows():
             stock_code = row["asset_id"]
             target_weight = row["weight"]
@@ -270,33 +392,64 @@ class OrderManager:
                 continue
 
             side = "BUY" if weight_diff > 0 else "SELL"
-
-            order = self.submit_order(
-                stock_code=stock_code,
-                side=side,
-                quantity=quantity,
-                price=price,
-                order_type="limit",
-            )
-            orders.append(order)
+            add_spec(stock_code, side, quantity, price)
 
         # Handle exits (stocks not in target)
-        for stock_code, weight in current_weights.items():
+        for stock_code, _weight in current_weights.items():
             if stock_code not in target_weights["asset_id"].values:
                 # Full exit
                 pos = positions[positions["stock_code"] == stock_code]
                 if not pos.empty:
                     quantity = pos.iloc[0]["quantity"]
                     price = pos.iloc[0]["current_price"]
+                    add_spec(stock_code, "SELL", quantity, price)
 
-                    order = self.submit_order(
-                        stock_code=stock_code,
-                        side="SELL",
-                        quantity=quantity,
-                        price=price,
-                        order_type="limit",
-                    )
-                    orders.append(order)
+        orders: list[Order] = []
+        notifier = notifier or self.notifier
+
+        def submit_specs(specs: list[dict[str, Any]]) -> list[Order]:
+            batch: list[Order] = []
+            for spec in specs:
+                order_price = 0 if order_type_normalized == "market" else spec["price"]
+                order = self.submit_order(
+                    stock_code=spec["stock_code"],
+                    side=spec["side"],
+                    quantity=spec["quantity"],
+                    price=order_price,
+                    order_type=order_type_normalized,
+                    notify_on_submit=notify_on_submit,
+                )
+                batch.append(order)
+                orders.append(order)
+            return batch
+
+        if sell_first:
+            sell_orders = submit_specs(sell_specs)
+            if wait_for_fills and sell_orders:
+                self.wait_for_fills(
+                    sell_orders,
+                    timeout_seconds=timeout_seconds,
+                    poll_interval=poll_interval,
+                    notifier=notifier,
+                )
+
+            buy_orders = submit_specs(buy_specs)
+            if wait_for_fills and buy_orders:
+                self.wait_for_fills(
+                    buy_orders,
+                    timeout_seconds=timeout_seconds,
+                    poll_interval=poll_interval,
+                    notifier=notifier,
+                )
+        else:
+            all_orders = submit_specs(sell_specs + buy_specs)
+            if wait_for_fills and all_orders:
+                self.wait_for_fills(
+                    all_orders,
+                    timeout_seconds=timeout_seconds,
+                    poll_interval=poll_interval,
+                    notifier=notifier,
+                )
 
         return orders
 

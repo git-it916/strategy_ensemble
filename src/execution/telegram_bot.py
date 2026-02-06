@@ -95,6 +95,23 @@ class TelegramNotifier:
 """
         return self.send_message(message.strip())
 
+    def send_fill_alert(
+        self,
+        stock_code: str,
+        stock_name: str,
+        side: str,
+        quantity: int,
+        price: float,
+    ) -> bool:
+        """Send order fill notification."""
+        emoji = "\U0001F7E2" if side.upper() == "BUY" else "\U0001F534"
+        name = stock_name or stock_code
+        if stock_name and stock_code and stock_name != stock_code:
+            name = f"{stock_name} ({stock_code})"
+
+        message = f"{emoji} {name} {quantity:,}\uC8FC \uCCB4\uACB0 @ {price:,.0f}\uC6D0"
+        return self.send_message(message.strip())
+
     def send_order_submitted(
         self,
         stock_code: str,
