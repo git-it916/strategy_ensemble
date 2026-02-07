@@ -150,6 +150,18 @@ class RSIReversalAlpha(BaseAlpha):
             }
         )
 
+    def _get_extra_state(self) -> dict:
+        return {
+            "rsi_period": self.rsi_period,
+            "oversold": self.oversold,
+            "overbought": self.overbought,
+        }
+
+    def _restore_extra_state(self, state: dict) -> None:
+        self.rsi_period = state.get("rsi_period", 14)
+        self.oversold = state.get("oversold", 30.0)
+        self.overbought = state.get("overbought", 70.0)
+
     def _calculate_rsi(self, prices: np.ndarray) -> float:
         """Calculate RSI from price array."""
         if len(prices) < self.rsi_period + 1:

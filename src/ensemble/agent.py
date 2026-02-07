@@ -6,6 +6,7 @@ The brain that combines multiple alpha strategies.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -316,3 +317,59 @@ class EnsembleAgent:
             if name in self._current_weights:
                 del self._current_weights[name]
             self._initialize_weights()
+
+    def get_state(self) -> dict[str, Any]:
+        """
+        Get full ensemble state for serialization.
+
+        Captures all internal state needed for faithful restoration,
+        including score_board history and per-strategy performance.
+
+        Returns:
+            Serializable state dict
+        """
+        return {
+            "config": self.config,
+            "current_weights": self._current_weights,
+            "base_weights": self.base_weights,
+            "use_dynamic_weights": self.use_dynamic_weights,
+            "performance_lookback": self.performance_lookback,
+            # ScoreBoard internal state
+            "score_board": {
+                "strategy_names": self.score_board.strategy_names,
+                "history": self.score_board._history,
+                "daily_returns": dict(self.score_board._daily_returns),
+            },
+            # Per-strategy performance history
+            "strategy_performance": {
+                name: s._performance_history
+                for name, s in self.strategies.items()
+            },
+        }
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        """
+        Restore ensemble state from saved dict.
+
+        Args:
+            state: State dict from get_state()
+        """
+        self._current_weights = state["current_weights"]
+        self.base_weights = state.get("base_weights", self.base_weights)
+        self.use_dynamic_weights = state.get("use_dynamic_weights", self.use_dynamic_weights)
+        self.performance_lookback = state.get("performance_lookback", self.performance_lookback)
+
+        # Restore ScoreBoard
+        sb_state = state.get("score_board")
+        if sb_state:
+            self.score_board.strategy_names = sb_state["strategy_names"]
+            self.score_board._history = sb_state["history"]
+            self.score_board._daily_returns = defaultdict(
+                list, sb_state["daily_returns"]
+            )
+
+        # Restore per-strategy performance history
+        perf_map = state.get("strategy_performance", {})
+        for name, history in perf_map.items():
+            if name in self.strategies:
+                self.strategies[name]._performance_history = history

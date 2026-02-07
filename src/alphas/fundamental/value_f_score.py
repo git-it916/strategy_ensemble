@@ -72,6 +72,16 @@ class ValueFScoreAlpha(BaseAlpha):
 
         return {"status": "fitted"}
 
+    def _get_extra_state(self) -> dict:
+        return {
+            "min_f_score": self.min_f_score,
+            "max_pb_ratio": self.max_pb_ratio,
+        }
+
+    def _restore_extra_state(self, state: dict) -> None:
+        self.min_f_score = state.get("min_f_score", 5)
+        self.max_pb_ratio = state.get("max_pb_ratio", 3.0)
+
     def generate_signals(
         self,
         date: datetime,

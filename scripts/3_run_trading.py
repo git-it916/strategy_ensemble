@@ -14,7 +14,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import pickle
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -48,15 +47,19 @@ def load_keys():
 
 
 def load_ensemble():
-    """Load trained ensemble model."""
-    ensemble_path = MODELS_DIR / "weights" / "ensemble.pkl"
+    """Load trained ensemble model via ModelManager."""
+    from src.models import ModelManager
 
-    if not ensemble_path.exists():
-        logger.error("Ensemble not found. Run 2_train_ensemble.py first.")
+    manager = ModelManager(MODELS_DIR)
+
+    try:
+        ensemble = manager.load_ensemble()
+        version = manager.get_version()
+        logger.info(f"Loaded ensemble model (version: {version})")
+        return ensemble
+    except FileNotFoundError as e:
+        logger.error(str(e))
         return None
-
-    with open(ensemble_path, "rb") as f:
-        return pickle.load(f)
 
 
 def load_latest_data():
@@ -253,7 +256,7 @@ def main():
     logger.info("=" * 60)
     logger.info("Trading Script Started")
     logger.info(f"Time: {datetime.now()}")
-    logger.info(f"Mode: {'PAPER' if is_paper else '⚠️ REAL'}")
+    logger.info(f"Mode: {'PAPER' if is_paper else 'REAL'}")
     logger.info(f"Dry Run: {args.dry_run}")
     logger.info("=" * 60)
 

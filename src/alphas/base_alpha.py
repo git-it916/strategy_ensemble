@@ -10,8 +10,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+import joblib
 import pandas as pd
 import numpy as np
 
@@ -192,6 +194,72 @@ class BaseAlpha(ABC):
             "sharpe": sharpe,
             "n_periods": len(recent),
         }
+
+    def save_state(self, path: Path) -> dict[str, Any]:
+        """
+        Save strategy state to disk.
+
+        Args:
+            path: File path to save to (.joblib)
+
+        Returns:
+            Metadata dict for registry
+        """
+        state = {
+            "class": self.__class__.__name__,
+            "module": self.__class__.__module__,
+            "name": self.name,
+            "config": self.config,
+            "is_fitted": self.is_fitted,
+            "fit_date": self._fit_date,
+            "performance_history": self._performance_history,
+        }
+        state.update(self._get_extra_state())
+        joblib.dump(state, path)
+
+        return {
+            "class": self.__class__.__name__,
+            "module": self.__class__.__module__,
+            "type": "rule_based",
+            "name": self.name,
+            "params": self.config,
+            "file": str(path),
+        }
+
+    def _get_extra_state(self) -> dict[str, Any]:
+        """
+        Override in subclass to save additional state.
+
+        Returns:
+            Extra state dict to merge into saved state
+        """
+        return {}
+
+    def _restore_extra_state(self, state: dict[str, Any]) -> None:
+        """Override in subclass to restore additional state."""
+        pass
+
+    @classmethod
+    def load_state(cls, path: Path) -> "BaseAlpha":
+        """
+        Load strategy from saved state.
+
+        Args:
+            path: File path to load from (.joblib)
+
+        Returns:
+            Restored strategy instance
+        """
+        state = joblib.load(path)
+
+        instance = cls.__new__(cls)
+        BaseAlpha.__init__(instance, name=state["name"], config=state.get("config", {}))
+        instance.is_fitted = state["is_fitted"]
+        instance._fit_date = state.get("fit_date")
+        instance._performance_history = state.get("performance_history", [])
+        instance._restore_extra_state(state)
+
+        return instance
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(name='{self.name}', fitted={self.is_fitted})"

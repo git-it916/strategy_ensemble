@@ -3,6 +3,7 @@
 2. Train Ensemble Script
 
 앙상블 모델 학습 및 전략 가중치 최적화.
+ModelManager를 통해 구조화된 모델 저장 (joblib + registry.yaml).
 
 Usage:
     python scripts/2_train_ensemble.py
@@ -12,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import pickle
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -126,37 +126,24 @@ def train_ensemble(
     }
 
 
-def save_models(ensemble, fit_results: dict):
-    """Save trained models."""
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    weights_dir = MODELS_DIR / "weights"
-    weights_dir.mkdir(exist_ok=True)
+def save_models(ensemble, fit_results: dict, data: dict, train_end_date: str):
+    """Save trained models via ModelManager."""
+    from src.models import ModelManager
 
-    # Save ensemble
-    ensemble_path = weights_dir / "ensemble.pkl"
-    with open(ensemble_path, "wb") as f:
-        pickle.dump(ensemble, f)
-    logger.info(f"Saved ensemble to {ensemble_path}")
+    manager = ModelManager(MODELS_DIR)
 
-    # Save individual strategies
-    for name, strategy in ensemble.strategies.items():
-        strategy_path = weights_dir / f"{name}.pkl"
-        with open(strategy_path, "wb") as f:
-            pickle.dump(strategy, f)
-        logger.info(f"Saved {name}")
-
-    # Save training metadata
-    import yaml
-    meta = {
-        "train_date": datetime.now().isoformat(),
-        "strategies": list(ensemble.strategies.keys()),
-        "weights": ensemble.get_weights(),
-        "fit_results": {k: str(v) for k, v in fit_results.items()},
+    # Build data metadata for lineage tracking
+    data_meta = {
+        "train_end": train_end_date,
+        "n_price_rows": len(data.get("prices", [])),
+        "n_feature_rows": len(data.get("features", [])),
+        "n_label_rows": len(data.get("labels", [])),
+        "data_hash": ModelManager.compute_data_hash(data["prices"]) if "prices" in data else None,
     }
 
-    meta_path = MODELS_DIR / "training_meta.yaml"
-    with open(meta_path, "w") as f:
-        yaml.dump(meta, f)
+    registry_path = manager.save_ensemble(ensemble, fit_results, data_meta)
+    logger.info(f"Models saved. Registry: {registry_path}")
+    logger.info(f"Model version: {manager.get_version()}")
 
 
 def main():
@@ -207,7 +194,7 @@ def main():
     )
 
     # Save models
-    save_models(result["ensemble"], result["fit_results"])
+    save_models(result["ensemble"], result["fit_results"], data, args.train_end)
 
     # Print summary
     logger.info("=" * 60)

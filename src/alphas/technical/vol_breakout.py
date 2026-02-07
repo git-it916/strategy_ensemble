@@ -68,6 +68,18 @@ class VolatilityBreakoutAlpha(BaseAlpha):
             "breakout_threshold": self.breakout_threshold,
         }
 
+    def _get_extra_state(self) -> dict:
+        return {
+            "lookback": self.lookback,
+            "breakout_threshold": self.breakout_threshold,
+            "volume_confirm": self.volume_confirm,
+        }
+
+    def _restore_extra_state(self, state: dict) -> None:
+        self.lookback = state.get("lookback", 20)
+        self.breakout_threshold = state.get("breakout_threshold", 1.5)
+        self.volume_confirm = state.get("volume_confirm", True)
+
     def generate_signals(
         self,
         date: datetime,

@@ -74,6 +74,18 @@ class SentimentLongAlpha(BaseAlpha):
             "quality_weight": self.quality_weight,
         }
 
+    def _get_extra_state(self) -> dict:
+        return {
+            "momentum_weight": self.momentum_weight,
+            "quality_weight": self.quality_weight,
+            "momentum_lookback": self.momentum_lookback,
+        }
+
+    def _restore_extra_state(self, state: dict) -> None:
+        self.momentum_weight = state.get("momentum_weight", 0.6)
+        self.quality_weight = state.get("quality_weight", 0.4)
+        self.momentum_lookback = state.get("momentum_lookback", 60)
+
     def generate_signals(
         self,
         date: datetime,
