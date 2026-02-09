@@ -19,7 +19,7 @@ class LabelEngineer:
     """
     Create label DataFrames for ML alpha training.
 
-    All outputs have columns: date, asset_id, y_reg
+    All outputs have columns: date, ticker, y_reg
     The y_reg column meaning differs per label type:
         - return: forward N-day return
         - volatility: forward N-day realized volatility
@@ -39,18 +39,18 @@ class LabelEngineer:
         Forward N-day return per stock.
 
         Args:
-            prices: DataFrame with date, asset_id, close
+            prices: DataFrame with date, ticker, close
             horizon: Forward return horizon in trading days
 
         Returns:
-            DataFrame with date, asset_id, y_reg (forward return)
+            DataFrame with date, ticker, y_reg (forward return)
         """
-        df = prices[["date", "asset_id", "close"]].copy()
-        df = df.sort_values(["asset_id", "date"])
+        df = prices[["date", "ticker", "close"]].copy()
+        df = df.sort_values(["ticker", "date"])
 
-        df["y_reg"] = df.groupby("asset_id")["close"].pct_change(horizon).shift(-horizon)
+        df["y_reg"] = df.groupby("ticker")["close"].pct_change(horizon).shift(-horizon)
 
-        result = df[["date", "asset_id", "y_reg"]].dropna(subset=["y_reg"])
+        result = df[["date", "ticker", "y_reg"]].dropna(subset=["y_reg"])
         logger.info(
             f"Return labels (horizon={horizon}d): {len(result)} rows, "
             f"mean={result['y_reg'].mean():.4f}, std={result['y_reg'].std():.4f}"
@@ -70,25 +70,25 @@ class LabelEngineer:
         Forward N-day realized volatility per stock.
 
         Args:
-            prices: DataFrame with date, asset_id, close
+            prices: DataFrame with date, ticker, close
             horizon: Forward volatility window in trading days
 
         Returns:
-            DataFrame with date, asset_id, y_reg (forward realized vol, annualized)
+            DataFrame with date, ticker, y_reg (forward realized vol, annualized)
         """
-        df = prices[["date", "asset_id", "close"]].copy()
-        df = df.sort_values(["asset_id", "date"])
+        df = prices[["date", "ticker", "close"]].copy()
+        df = df.sort_values(["ticker", "date"])
 
-        df["_ret"] = df.groupby("asset_id")["close"].pct_change()
+        df["_ret"] = df.groupby("ticker")["close"].pct_change()
 
         # Forward rolling std of returns, then annualize
         df["y_reg"] = (
-            df.groupby("asset_id")["_ret"]
+            df.groupby("ticker")["_ret"]
             .transform(lambda x: x.shift(-horizon).rolling(horizon).std())
             * np.sqrt(252)
         )
 
-        result = df[["date", "asset_id", "y_reg"]].dropna(subset=["y_reg"])
+        result = df[["date", "ticker", "y_reg"]].dropna(subset=["y_reg"])
         logger.info(
             f"Volatility labels (horizon={horizon}d): {len(result)} rows, "
             f"mean={result['y_reg'].mean():.4f}"
@@ -110,7 +110,7 @@ class LabelEngineer:
         Market regime labels based on forward aggregate market return.
 
         Args:
-            prices: DataFrame with date, asset_id, close
+            prices: DataFrame with date, ticker, close
             horizon: Forward window for regime determination
             bull_threshold: Return above this = bull
             bear_threshold: Return below this = bear
@@ -172,29 +172,29 @@ class LabelEngineer:
         Labels for intraday pattern alpha.
 
         Args:
-            prices: DataFrame with date, asset_id, open, close
+            prices: DataFrame with date, ticker, open, close
             label_type:
                 - "next_open_gap": (next_day_open - today_close) / today_close
                 - "next_close_ret": next day close-to-close return
 
         Returns:
-            DataFrame with date, asset_id, y_reg
+            DataFrame with date, ticker, y_reg
         """
-        df = prices[["date", "asset_id", "open", "close"]].copy()
-        df = df.sort_values(["asset_id", "date"])
+        df = prices[["date", "ticker", "open", "close"]].copy()
+        df = df.sort_values(["ticker", "date"])
 
         if label_type == "next_open_gap":
-            df["_next_open"] = df.groupby("asset_id")["open"].shift(-1)
+            df["_next_open"] = df.groupby("ticker")["open"].shift(-1)
             df["y_reg"] = (df["_next_open"] - df["close"]) / df["close"]
             df.drop(columns=["_next_open"], inplace=True)
 
         elif label_type == "next_close_ret":
-            df["y_reg"] = df.groupby("asset_id")["close"].pct_change().shift(-1)
+            df["y_reg"] = df.groupby("ticker")["close"].pct_change().shift(-1)
 
         else:
             raise ValueError(f"Unknown label_type: {label_type}")
 
-        result = df[["date", "asset_id", "y_reg"]].dropna(subset=["y_reg"])
+        result = df[["date", "ticker", "y_reg"]].dropna(subset=["y_reg"])
         logger.info(f"Intraday labels ({label_type}): {len(result)} rows")
         return result
 

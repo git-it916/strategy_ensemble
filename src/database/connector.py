@@ -178,7 +178,7 @@ class DuckDBConnector:
         """)
         return result.iloc[0]["min_date"], result.iloc[0]["max_date"]
 
-    def get_unique_assets(self, table_name: str, asset_col: str = "asset_id") -> list[str]:
+    def get_unique_assets(self, table_name: str, asset_col: str = "ticker") -> list[str]:
         """Get unique asset IDs from table."""
         result = self.query_df(f"SELECT DISTINCT {asset_col} FROM {table_name}")
         return result[asset_col].tolist()
@@ -218,11 +218,11 @@ def load_prices(
         conditions.append(f"date <= '{end_date}'")
     if assets:
         asset_str = ", ".join(f"'{a}'" for a in assets)
-        conditions.append(f"asset_id IN ({asset_str})")
+        conditions.append(f"ticker IN ({asset_str})")
 
     where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
 
-    query = f"SELECT * FROM prices{where_clause} ORDER BY date, asset_id"
+    query = f"SELECT * FROM prices{where_clause} ORDER BY date, ticker"
 
     return conn.query_df(query)
 
@@ -246,7 +246,7 @@ def load_features(
         Features DataFrame
     """
     if feature_cols:
-        cols = ", ".join(["date", "asset_id"] + feature_cols)
+        cols = ", ".join(["date", "ticker"] + feature_cols)
     else:
         cols = "*"
 
@@ -258,6 +258,6 @@ def load_features(
 
     where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
 
-    query = f"SELECT {cols} FROM features{where_clause} ORDER BY date, asset_id"
+    query = f"SELECT {cols} FROM features{where_clause} ORDER BY date, ticker"
 
     return conn.query_df(query)

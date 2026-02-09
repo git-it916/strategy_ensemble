@@ -179,10 +179,10 @@ class ParquetConverter:
             # Combine
             combined = pd.concat([existing_df, df], ignore_index=True)
 
-            # Remove duplicates based on date + asset_id
-            if "date" in combined.columns and "asset_id" in combined.columns:
+            # Remove duplicates based on date + ticker
+            if "date" in combined.columns and "ticker" in combined.columns:
                 combined = combined.drop_duplicates(
-                    subset=["date", "asset_id"],
+                    subset=["date", "ticker"],
                     keep="last"
                 )
 
@@ -242,8 +242,8 @@ def convert_bloomberg_export(
     column_map = {
         "Date": "date",
         "DATE": "date",
-        "Ticker": "asset_id",
-        "TICKER": "asset_id",
+        "Ticker": "ticker",
+        "TICKER": "ticker",
         "PX_LAST": "close",
         "PX_OPEN": "open",
         "PX_HIGH": "high",

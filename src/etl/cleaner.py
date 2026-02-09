@@ -45,7 +45,7 @@ class DataCleaner:
         Clean price data.
 
         Args:
-            df: Price DataFrame with date, asset_id, close columns
+            df: Price DataFrame with date, ticker, close columns
 
         Returns:
             Cleaned DataFrame
@@ -58,7 +58,7 @@ class DataCleaner:
             df["date"] = pd.to_datetime(df["date"])
 
         # Remove rows with missing essential data
-        essential_cols = ["date", "asset_id", "close"]
+        essential_cols = ["date", "ticker", "close"]
         for col in essential_cols:
             if col in df.columns:
                 df = df.dropna(subset=[col])
@@ -78,7 +78,7 @@ class DataCleaner:
                     df[col] = df[col].fillna(df["close"])
 
         # Sort
-        df = df.sort_values(["asset_id", "date"]).reset_index(drop=True)
+        df = df.sort_values(["ticker", "date"]).reset_index(drop=True)
 
         logger.info(f"Cleaned prices: {initial_rows} -> {len(df)} rows")
 
@@ -98,16 +98,16 @@ class DataCleaner:
         initial_rows = len(df)
 
         # Remove rows with too many missing values
-        feature_cols = [c for c in df.columns if c not in ["date", "asset_id"]]
+        feature_cols = [c for c in df.columns if c not in ["date", "ticker"]]
 
         if feature_cols:
             missing_pct = df[feature_cols].isna().mean(axis=1)
             df = df[missing_pct <= self.max_missing_pct]
 
         # Forward fill within each asset
-        if "asset_id" in df.columns:
-            df = df.sort_values(["asset_id", "date"])
-            df[feature_cols] = df.groupby("asset_id")[feature_cols].transform(
+        if "ticker" in df.columns:
+            df = df.sort_values(["ticker", "date"])
+            df[feature_cols] = df.groupby("ticker")[feature_cols].transform(
                 lambda x: x.fillna(method="ffill").fillna(method="bfill")
             )
 
@@ -146,7 +146,7 @@ class DataCleaner:
 
         if columns is None:
             columns = df.select_dtypes(include=[np.number]).columns.tolist()
-            columns = [c for c in columns if c not in ["date", "asset_id"]]
+            columns = [c for c in columns if c not in ["date", "ticker"]]
 
         for col in columns:
             if col not in df.columns:
@@ -184,11 +184,11 @@ class DataCleaner:
 
         # Check for required columns
         if data_type == "prices":
-            required = ["date", "asset_id", "close"]
+            required = ["date", "ticker", "close"]
         elif data_type == "features":
-            required = ["date", "asset_id"]
+            required = ["date", "ticker"]
         elif data_type == "labels":
-            required = ["date", "asset_id", "y_reg"]
+            required = ["date", "ticker", "y_reg"]
         else:
             required = []
 
@@ -211,14 +211,14 @@ class DataCleaner:
             }
 
         # Check for duplicates
-        if "date" in df.columns and "asset_id" in df.columns:
-            dupes = df.duplicated(subset=["date", "asset_id"]).sum()
+        if "date" in df.columns and "ticker" in df.columns:
+            dupes = df.duplicated(subset=["date", "ticker"]).sum()
             if dupes > 0:
                 report["issues"].append(f"Duplicate date-asset pairs: {dupes}")
 
         # Asset coverage
-        if "asset_id" in df.columns:
-            report["n_assets"] = df["asset_id"].nunique()
+        if "ticker" in df.columns:
+            report["n_assets"] = df["ticker"].nunique()
 
         report["is_valid"] = len(report["issues"]) == 0
 
@@ -239,7 +239,7 @@ def clean_feature_data(df: pd.DataFrame) -> pd.DataFrame:
 
 def forward_fill_panel(
     df: pd.DataFrame,
-    group_col: str = "asset_id",
+    group_col: str = "ticker",
     time_col: str = "date",
     max_gap: int = 5,
 ) -> pd.DataFrame:
@@ -248,7 +248,7 @@ def forward_fill_panel(
 
     Args:
         df: Panel DataFrame
-        group_col: Group column (e.g., asset_id)
+        group_col: Group column (e.g., ticker)
         time_col: Time column
         max_gap: Maximum consecutive gaps to fill
 

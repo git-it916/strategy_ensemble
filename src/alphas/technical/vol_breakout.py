@@ -102,8 +102,8 @@ class VolatilityBreakoutAlpha(BaseAlpha):
         # Filter data up to date
         prices = prices[prices["date"] <= pd.Timestamp(date)]
 
-        for asset_id in prices["asset_id"].unique():
-            asset_data = prices[prices["asset_id"] == asset_id].sort_values("date")
+        for ticker in prices["ticker"].unique():
+            asset_data = prices[prices["ticker"] == ticker].sort_values("date")
 
             if len(asset_data) < self.lookback + 1:
                 continue
@@ -157,7 +157,7 @@ class VolatilityBreakoutAlpha(BaseAlpha):
                         score *= min(volume_ratio, 2.0)
 
             signals_list.append({
-                "asset_id": asset_id,
+                "ticker": ticker,
                 "score": score,
                 "breakout_up": current_close > highest_high,
                 "breakout_down": current_close < lowest_low,
@@ -166,7 +166,7 @@ class VolatilityBreakoutAlpha(BaseAlpha):
         signals = pd.DataFrame(signals_list)
 
         if signals.empty:
-            signals = pd.DataFrame(columns=["asset_id", "score"])
+            signals = pd.DataFrame(columns=["ticker", "score"])
 
         return AlphaResult(
             date=date,

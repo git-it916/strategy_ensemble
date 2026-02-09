@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class EnsembleSignal:
     """Combined signal from ensemble."""
     date: datetime
-    signals: pd.DataFrame  # asset_id, score, weight contributions
+    signals: pd.DataFrame  # ticker, score, weight contributions
     strategy_weights: dict[str, float]
     regime: str | None = None
 
@@ -175,17 +175,17 @@ class EnsembleAgent:
             Combined signals DataFrame
         """
         if not all_signals:
-            return pd.DataFrame(columns=["asset_id", "score"])
+            return pd.DataFrame(columns=["ticker", "score"])
 
         # Get all unique assets
         all_assets = set()
         for df in all_signals.values():
-            all_assets.update(df["asset_id"].tolist())
+            all_assets.update(df["ticker"].tolist())
 
         # Initialize combined scores
         combined_data = []
 
-        for asset_id in all_assets:
+        for ticker in all_assets:
             weighted_score = 0.0
             total_weight = 0.0
             contributions = {}
@@ -193,7 +193,7 @@ class EnsembleAgent:
             for strat_name, signals in all_signals.items():
                 weight = self._current_weights.get(strat_name, 0)
 
-                asset_signal = signals[signals["asset_id"] == asset_id]
+                asset_signal = signals[signals["ticker"] == ticker]
                 if not asset_signal.empty:
                     score = asset_signal.iloc[0]["score"]
                     weighted_score += weight * score
@@ -207,7 +207,7 @@ class EnsembleAgent:
                 final_score = 0.0
 
             combined_data.append({
-                "asset_id": asset_id,
+                "ticker": ticker,
                 "score": final_score,
                 **{f"{k}_contrib": v for k, v in contributions.items()},
             })

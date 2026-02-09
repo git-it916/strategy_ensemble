@@ -30,12 +30,12 @@ class Allocator(ABC):
         Convert signals to portfolio weights.
 
         Args:
-            signals: DataFrame with asset_id, score
+            signals: DataFrame with ticker, score
             prices: Optional price data for vol calculation
             constraints: Position constraints
 
         Returns:
-            DataFrame with asset_id, weight
+            DataFrame with ticker, weight
         """
         pass
 
@@ -66,7 +66,7 @@ class TopKAllocator(Allocator):
     ) -> pd.DataFrame:
         """Allocate to top K assets."""
         if signals.empty:
-            return pd.DataFrame(columns=["asset_id", "weight"])
+            return pd.DataFrame(columns=["ticker", "weight"])
 
         # Sort by score
         sorted_signals = signals.sort_values("score", ascending=False)
@@ -79,13 +79,13 @@ class TopKAllocator(Allocator):
         top_k = sorted_signals.head(self.k)
 
         if top_k.empty:
-            return pd.DataFrame(columns=["asset_id", "weight"])
+            return pd.DataFrame(columns=["ticker", "weight"])
 
         # Equal weight
         weight = 1.0 / len(top_k)
 
         result = pd.DataFrame({
-            "asset_id": top_k["asset_id"],
+            "ticker": top_k["ticker"],
             "weight": weight,
         })
 
@@ -125,7 +125,7 @@ class ScoreWeightedAllocator(Allocator):
     ) -> pd.DataFrame:
         """Allocate based on scores."""
         if signals.empty:
-            return pd.DataFrame(columns=["asset_id", "weight"])
+            return pd.DataFrame(columns=["ticker", "weight"])
 
         df = signals.copy()
 
@@ -133,7 +133,7 @@ class ScoreWeightedAllocator(Allocator):
             df = df[df["score"] > 0]
 
         if df.empty:
-            return pd.DataFrame(columns=["asset_id", "weight"])
+            return pd.DataFrame(columns=["ticker", "weight"])
 
         # Sort and limit
         df = df.sort_values("score", ascending=False)
@@ -166,7 +166,7 @@ class ScoreWeightedAllocator(Allocator):
         weights = weights / weights.sum()
 
         result = pd.DataFrame({
-            "asset_id": df["asset_id"],
+            "ticker": df["ticker"],
             "weight": weights.values,
         })
 
@@ -206,31 +206,31 @@ class RiskParityAllocator(Allocator):
     ) -> pd.DataFrame:
         """Allocate using risk parity."""
         if signals.empty:
-            return pd.DataFrame(columns=["asset_id", "weight"])
+            return pd.DataFrame(columns=["ticker", "weight"])
 
         # Select top K by score
         df = signals[signals["score"] > 0].sort_values("score", ascending=False)
         df = df.head(self.top_k)
 
         if df.empty:
-            return pd.DataFrame(columns=["asset_id", "weight"])
+            return pd.DataFrame(columns=["ticker", "weight"])
 
         # Calculate volatilities if prices provided
         vols = {}
         if prices is not None:
-            for asset_id in df["asset_id"]:
-                asset_prices = prices[prices["asset_id"] == asset_id].sort_values("date")
+            for ticker in df["ticker"]:
+                asset_prices = prices[prices["ticker"] == ticker].sort_values("date")
                 if len(asset_prices) >= self.vol_lookback:
                     returns = asset_prices["close"].pct_change().dropna()
-                    vols[asset_id] = returns.tail(self.vol_lookback).std() * np.sqrt(252)
+                    vols[ticker] = returns.tail(self.vol_lookback).std() * np.sqrt(252)
                 else:
-                    vols[asset_id] = 0.2  # Default vol
+                    vols[ticker] = 0.2  # Default vol
 
         # Risk parity weights (inverse vol)
         weights = {}
-        for asset_id in df["asset_id"]:
-            vol = vols.get(asset_id, 0.2)
-            weights[asset_id] = 1 / max(vol, 0.05)  # Floor vol at 5%
+        for ticker in df["ticker"]:
+            vol = vols.get(ticker, 0.2)
+            weights[ticker] = 1 / max(vol, 0.05)  # Floor vol at 5%
 
         # Normalize
         total = sum(weights.values())
@@ -244,7 +244,7 @@ class RiskParityAllocator(Allocator):
         weights = {k: v / total for k, v in weights.items()}
 
         result = pd.DataFrame([
-            {"asset_id": k, "weight": v}
+            {"ticker": k, "weight": v}
             for k, v in weights.items()
         ])
 
@@ -288,29 +288,29 @@ class BlackLittermanAllocator(Allocator):
         Simplified implementation - full BL requires covariance matrix.
         """
         if signals.empty or prices is None:
-            return pd.DataFrame(columns=["asset_id", "weight"])
+            return pd.DataFrame(columns=["ticker", "weight"])
 
         # For simplicity, use score-weighted with vol scaling
         df = signals[signals["score"] > 0].sort_values("score", ascending=False)
         df = df.head(20)
 
         if df.empty:
-            return pd.DataFrame(columns=["asset_id", "weight"])
+            return pd.DataFrame(columns=["ticker", "weight"])
 
         # Calculate vol-adjusted scores
         adjusted_scores = {}
         for _, row in df.iterrows():
-            asset_id = row["asset_id"]
+            ticker = row["ticker"]
             score = row["score"]
 
-            asset_prices = prices[prices["asset_id"] == asset_id].sort_values("date")
+            asset_prices = prices[prices["ticker"] == ticker].sort_values("date")
             if len(asset_prices) >= 60:
                 vol = asset_prices["close"].pct_change().tail(60).std() * np.sqrt(252)
             else:
                 vol = 0.2
 
             # Score / volatility (Sharpe-like)
-            adjusted_scores[asset_id] = score / max(vol, 0.05)
+            adjusted_scores[ticker] = score / max(vol, 0.05)
 
         # Normalize
         total = sum(max(v, 0) for v in adjusted_scores.values())
@@ -327,7 +327,7 @@ class BlackLittermanAllocator(Allocator):
         weights = {k: v / total for k, v in weights.items()}
 
         result = pd.DataFrame([
-            {"asset_id": k, "weight": v}
+            {"ticker": k, "weight": v}
             for k, v in weights.items()
         ])
 

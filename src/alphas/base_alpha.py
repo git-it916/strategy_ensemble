@@ -25,16 +25,16 @@ class AlphaResult:
 
     Attributes:
         date: Signal date
-        signals: DataFrame with asset_id, score columns
+        signals: DataFrame with ticker, score columns
         metadata: Additional information
     """
     date: datetime
-    signals: pd.DataFrame  # Must have: asset_id, score
+    signals: pd.DataFrame  # Must have: ticker, score
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate signals DataFrame."""
-        required_cols = {"asset_id", "score"}
+        required_cols = {"ticker", "score"}
         if not required_cols.issubset(self.signals.columns):
             missing = required_cols - set(self.signals.columns)
             raise ValueError(f"Missing required columns: {missing}")
@@ -91,7 +91,7 @@ class BaseAlpha(ABC):
         Fit/train the strategy.
 
         Args:
-            prices: Price data (date, asset_id, close, ...)
+            prices: Price data (date, ticker, close, ...)
             features: Feature data (optional)
             labels: Label data for supervised strategies (optional)
 
@@ -295,12 +295,12 @@ class DummyAlpha(BaseAlpha):
     ) -> AlphaResult:
         """Generate random signals."""
         # Get unique assets
-        assets = prices["asset_id"].unique()
+        assets = prices["ticker"].unique()
 
         np.random.seed(self.seed + hash(str(date)) % 1000)
 
         signals = pd.DataFrame({
-            "asset_id": assets,
+            "ticker": assets,
             "score": np.random.randn(len(assets)),
         })
 

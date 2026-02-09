@@ -123,11 +123,11 @@ class SchemaManager:
             CREATE OR REPLACE VIEW daily_returns AS
             SELECT
                 date,
-                asset_id,
+                ticker,
                 close,
-                close / LAG(close) OVER (PARTITION BY asset_id ORDER BY date) - 1 as daily_return
+                close / LAG(close) OVER (PARTITION BY ticker ORDER BY date) - 1 as daily_return
             FROM prices
-            ORDER BY date, asset_id
+            ORDER BY date, ticker
         """
         self.conn.execute(query)
         logger.info("Created daily_returns view")

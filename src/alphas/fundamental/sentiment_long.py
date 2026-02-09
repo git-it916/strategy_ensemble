@@ -108,8 +108,8 @@ class SentimentLongAlpha(BaseAlpha):
         # Filter prices up to date
         prices = prices[prices["date"] <= pd.Timestamp(date)]
 
-        for asset_id in prices["asset_id"].unique():
-            asset_prices = prices[prices["asset_id"] == asset_id].sort_values("date")
+        for ticker in prices["ticker"].unique():
+            asset_prices = prices[prices["ticker"] == ticker].sort_values("date")
 
             if len(asset_prices) < self.momentum_lookback:
                 continue
@@ -131,7 +131,7 @@ class SentimentLongAlpha(BaseAlpha):
 
             if features is not None:
                 asset_features = features[
-                    (features["asset_id"] == asset_id) &
+                    (features["ticker"] == ticker) &
                     (features["date"] <= pd.Timestamp(date))
                 ]
 
@@ -169,7 +169,7 @@ class SentimentLongAlpha(BaseAlpha):
                 combined_score *= 0.5  # Reduce signal for negative momentum
 
             signals_list.append({
-                "asset_id": asset_id,
+                "ticker": ticker,
                 "score": combined_score,
                 "momentum_score": momentum_score,
                 "quality_score": quality_score,
@@ -178,7 +178,7 @@ class SentimentLongAlpha(BaseAlpha):
         signals = pd.DataFrame(signals_list)
 
         if signals.empty:
-            signals = pd.DataFrame(columns=["asset_id", "score"])
+            signals = pd.DataFrame(columns=["ticker", "score"])
 
         return AlphaResult(
             date=date,

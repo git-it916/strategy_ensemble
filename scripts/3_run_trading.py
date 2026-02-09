@@ -164,7 +164,7 @@ def run_trading_cycle(
     # Send signal alert
     if notifier:
         stocks = [
-            {"stock_code": row["asset_id"], "name": row["asset_id"], "score": row["score"]}
+            {"stock_code": row["ticker"], "name": row["ticker"], "score": row["score"]}
             for _, row in top_signals.iterrows()
         ]
         notifier.send_signal_alert(

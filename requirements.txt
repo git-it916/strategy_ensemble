@@ -15,7 +15,13 @@ python-dotenv>=1.0.0
 
 # Machine Learning
 scikit-learn>=1.3.0
+xgboost>=2.0.0
 joblib>=1.3.0
+
+# Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
 
 # HTTP requests
 requests>=2.31.0
@@ -31,16 +37,19 @@ loguru>=0.7.0
 # Validation
 pydantic>=2.0.0
 
+# Telegram
+telethon>=1.34.0
+
+# Visualization (optional but recommended)
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
 # Development (optional)
 pytest>=7.4.0
 pytest-cov>=4.1.0
 black>=23.0.0
 ruff>=0.1.0
 mypy>=1.5.0
-
-# senti by telegram
-telethon>=1.34.0
-python-dotenv>=1.0.0
 
 # Bloomberg (install separately via Bloomberg Terminal)
 # blpapi

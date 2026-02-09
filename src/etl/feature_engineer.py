@@ -2,7 +2,7 @@
 Feature Engineer
 
 Build ML features from daily OHLCV and minute-bar data.
-All features are computed per (date, asset_id) with no lookahead.
+All features are computed per (date, ticker) with no lookahead.
 """
 
 from __future__ import annotations
@@ -38,13 +38,13 @@ class FeatureEngineer:
         Build per-stock daily features from OHLCV.
 
         Args:
-            prices: DataFrame with date, asset_id, open, high, low, close, volume
+            prices: DataFrame with date, ticker, open, high, low, close, volume
 
         Returns:
-            DataFrame with date, asset_id, and feature columns
+            DataFrame with date, ticker, and feature columns
         """
-        prices = prices.sort_values(["asset_id", "date"]).copy()
-        groups = prices.groupby("asset_id")
+        prices = prices.sort_values(["ticker", "date"]).copy()
+        groups = prices.groupby("ticker")
 
         # --- Returns ---
         prices["ret_1d"] = groups["close"].pct_change(1)
@@ -73,7 +73,7 @@ class FeatureEngineer:
         ema12 = groups["close"].transform(lambda x: x.ewm(span=12).mean())
         ema26 = groups["close"].transform(lambda x: x.ewm(span=26).mean())
         prices["macd"] = ema12 - ema26
-        prices["macd_signal"] = prices.groupby("asset_id")["macd"].transform(
+        prices["macd_signal"] = prices.groupby("ticker")["macd"].transform(
             lambda x: x.ewm(span=9).mean()
         )
 
@@ -88,7 +88,7 @@ class FeatureEngineer:
         # --- Parkinson volatility (high-low based) ---
         if "high" in prices.columns and "low" in prices.columns:
             hl_ratio = np.log(prices["high"] / prices["low"])
-            prices["parkinson_vol"] = prices.groupby("asset_id")[
+            prices["parkinson_vol"] = prices.groupby("ticker")[
                 hl_ratio.name if hasattr(hl_ratio, "name") else "hl_ratio"
             ].transform(lambda x: x.rolling(20).apply(
                 lambda w: np.sqrt(w.pow(2).sum() / (4 * len(w) * np.log(2)))
@@ -157,7 +157,7 @@ class FeatureEngineer:
             if col in prices.columns:
                 feature_cols.append(col)
 
-        result = prices[["date", "asset_id"] + feature_cols].copy()
+        result = prices[["date", "ticker"] + feature_cols].copy()
         logger.info(f"Built {len(feature_cols)} daily features, {len(result)} rows")
         return result
 
@@ -175,13 +175,13 @@ class FeatureEngineer:
         Aggregate minute bars to daily intraday microstructure features.
 
         Args:
-            minute_bars: DataFrame with datetime, asset_id, open, high, low, close, volume
+            minute_bars: DataFrame with datetime, ticker, open, high, low, close, volume
                          datetime column should be full timestamp (date + time)
             market_open: Market open time (HH:MM)
             market_close: Market close time (HH:MM)
 
         Returns:
-            DataFrame with date, asset_id, and intraday feature columns
+            DataFrame with date, ticker, and intraday feature columns
         """
         df = minute_bars.copy()
         df["datetime"] = pd.to_datetime(df["datetime"])
@@ -197,17 +197,17 @@ class FeatureEngineer:
         mkt_open = pd.Timestamp(f"1900-01-01 {market_open}").time()
 
         # Minute returns
-        df = df.sort_values(["asset_id", "datetime"])
-        df["bar_ret"] = df.groupby(["asset_id", "date"])["close"].pct_change()
+        df = df.sort_values(["ticker", "datetime"])
+        df["bar_ret"] = df.groupby(["ticker", "date"])["close"].pct_change()
 
         results = []
 
-        for (asset_id, date), day_df in df.groupby(["asset_id", "date"]):
+        for (ticker, date), day_df in df.groupby(["ticker", "date"]):
             if len(day_df) < 10:
                 continue
 
             bar_rets = day_df["bar_ret"].dropna()
-            row = {"date": date, "asset_id": asset_id}
+            row = {"date": date, "ticker": ticker}
 
             # --- Overall intraday stats ---
             row["intraday_vol"] = bar_rets.std() * np.sqrt(len(bar_rets))
@@ -304,7 +304,7 @@ class FeatureEngineer:
 
         if not result_df.empty:
             # Fill open-close gap using daily first/last
-            result_df = result_df.sort_values(["asset_id", "date"])
+            result_df = result_df.sort_values(["ticker", "date"])
             # This needs previous day close - will be joined with daily data later
 
         logger.info(
@@ -322,25 +322,25 @@ class FeatureEngineer:
         Build market-level (cross-sectional) features per date.
 
         Args:
-            prices: Daily OHLCV with date, asset_id, close, volume
+            prices: Daily OHLCV with date, ticker, close, volume
 
         Returns:
             DataFrame with date and market feature columns (1 row per date)
         """
-        prices = prices.sort_values(["asset_id", "date"]).copy()
+        prices = prices.sort_values(["ticker", "date"]).copy()
 
         # Per-stock daily returns
-        prices["_ret"] = prices.groupby("asset_id")["close"].pct_change()
-        prices["_ma20"] = prices.groupby("asset_id")["close"].transform(
+        prices["_ret"] = prices.groupby("ticker")["close"].pct_change()
+        prices["_ma20"] = prices.groupby("ticker")["close"].transform(
             lambda x: x.rolling(20).mean()
         )
         prices["_above_ma20"] = (prices["close"] > prices["_ma20"]).astype(int)
 
         # 52-week high/low
-        prices["_high_52w"] = prices.groupby("asset_id")["close"].transform(
+        prices["_high_52w"] = prices.groupby("ticker")["close"].transform(
             lambda x: x.rolling(252).max()
         )
-        prices["_low_52w"] = prices.groupby("asset_id")["close"].transform(
+        prices["_low_52w"] = prices.groupby("ticker")["close"].transform(
             lambda x: x.rolling(252).min()
         )
         prices["_at_52w_high"] = (prices["close"] >= prices["_high_52w"]).astype(int)
@@ -420,7 +420,7 @@ class FeatureEngineer:
         if "intraday" in result and not result["intraday"].empty:
             combined = combined.merge(
                 result["intraday"],
-                on=["date", "asset_id"],
+                on=["date", "ticker"],
                 how="left",
             )
 

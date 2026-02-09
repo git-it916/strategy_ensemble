@@ -77,7 +77,7 @@ def fetch_historical_data(
                         field_data = field_data_array.getValueAsElement(i)
 
                         record = {
-                            "asset_id": clean_ticker,
+                            "ticker": clean_ticker,
                             "date": pd.Timestamp(field_data.getElementAsDatetime("date")),
                         }
 
@@ -150,8 +150,8 @@ def generate_features(prices_df: pd.DataFrame) -> pd.DataFrame:
     """Generate features from price data."""
     feature_records = []
 
-    for ticker in prices_df["asset_id"].unique():
-        ticker_data = prices_df[prices_df["asset_id"] == ticker].sort_values("date")
+    for ticker in prices_df["ticker"].unique():
+        ticker_data = prices_df[prices_df["ticker"] == ticker].sort_values("date")
 
         if len(ticker_data) < 60:
             continue
@@ -194,7 +194,7 @@ def generate_features(prices_df: pd.DataFrame) -> pd.DataFrame:
 
             feature_records.append({
                 "date": dates[i],
-                "asset_id": ticker,
+                "ticker": ticker,
                 "ret_5d": ret_5d,
                 "ret_21d": ret_21d,
                 "ret_60d": ret_60d,
@@ -213,8 +213,8 @@ def generate_labels(prices_df: pd.DataFrame, forward_days: int = 21) -> pd.DataF
     """Generate labels from price data."""
     label_records = []
 
-    for ticker in prices_df["asset_id"].unique():
-        ticker_data = prices_df[prices_df["asset_id"] == ticker].sort_values("date")
+    for ticker in prices_df["ticker"].unique():
+        ticker_data = prices_df[prices_df["ticker"] == ticker].sort_values("date")
 
         if len(ticker_data) < forward_days + 60:
             continue
@@ -229,7 +229,7 @@ def generate_labels(prices_df: pd.DataFrame, forward_days: int = 21) -> pd.DataF
 
             label_records.append({
                 "date": dates[i],
-                "asset_id": ticker,
+                "ticker": ticker,
                 "y_reg": fwd_return,
                 "y_cls": 1 if fwd_return > 0 else 0,
             })
@@ -413,7 +413,7 @@ def main():
 
     prices_df = pd.concat(all_prices, ignore_index=True)
     print(f"\nTotal price records: {len(prices_df)}")
-    print(f"Unique tickers: {prices_df['asset_id'].nunique()}")
+    print(f"Unique tickers: {prices_df['ticker'].nunique()}")
     print(f"Date range: {prices_df['date'].min()} to {prices_df['date'].max()}")
 
     # Add close/open columns
@@ -446,11 +446,11 @@ def main():
         "run_date": datetime.now().isoformat(),
         "start_date": args.start_date,
         "end_date": args.end_date,
-        "n_tickers": prices_df["asset_id"].nunique(),
+        "n_tickers": prices_df["ticker"].nunique(),
         "n_price_records": len(prices_df),
         "n_feature_records": len(features_df),
         "n_label_records": len(labels_df),
-        "tickers": list(prices_df["asset_id"].unique()),
+        "tickers": list(prices_df["ticker"].unique()),
     }
 
     import yaml

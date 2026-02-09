@@ -119,17 +119,17 @@ class VolatilityForecastAlpha(BaseMLAlpha):
             features: Feature DataFrame
 
         Returns:
-            DataFrame with asset_id, predicted_vol columns
+            DataFrame with ticker, predicted_vol columns
         """
         if features is None or not self.is_fitted:
-            return pd.DataFrame(columns=["asset_id", "predicted_vol"])
+            return pd.DataFrame(columns=["ticker", "predicted_vol"])
 
         feat = features[features["date"] <= pd.Timestamp(date)]
-        latest = feat.sort_values("date").groupby("asset_id").last().reset_index()
+        latest = feat.sort_values("date").groupby("ticker").last().reset_index()
 
         missing = set(self.feature_columns) - set(latest.columns)
         if missing:
-            return pd.DataFrame(columns=["asset_id", "predicted_vol"])
+            return pd.DataFrame(columns=["ticker", "predicted_vol"])
 
         X = latest[self.feature_columns].values
         X = np.nan_to_num(X, nan=0.0)
@@ -140,6 +140,6 @@ class VolatilityForecastAlpha(BaseMLAlpha):
         predictions = np.maximum(predictions, 0.01)
 
         return pd.DataFrame({
-            "asset_id": latest["asset_id"].values,
+            "ticker": latest["ticker"].values,
             "predicted_vol": predictions,
         })

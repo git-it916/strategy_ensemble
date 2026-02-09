@@ -13,7 +13,8 @@
       "Bash(\"C:\\\\Users\\\\Bloomberg\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe\":*)",
       "Bash(ls:*)",
       "Bash(dir:*)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(python:*)"
     ]
   }
 }

@@ -85,8 +85,8 @@ class BaseMLAlpha(BaseAlpha):
                 f"{self.name}: ML alpha requires both features and labels for training"
             )
 
-        # Align features and labels on (date, asset_id)
-        merged = features.merge(labels, on=["date", "asset_id"], how="inner")
+        # Align features and labels on (date, ticker)
+        merged = features.merge(labels, on=["date", "ticker"], how="inner")
 
         # Check required columns exist
         missing = set(self.feature_columns) - set(merged.columns)
@@ -137,7 +137,7 @@ class BaseMLAlpha(BaseAlpha):
         if features is None or not self.is_fitted:
             return AlphaResult(
                 date=date,
-                signals=pd.DataFrame(columns=["asset_id", "score"]),
+                signals=pd.DataFrame(columns=["ticker", "score"]),
                 metadata={"strategy": self.name, "error": "not ready"},
             )
 
@@ -145,14 +145,14 @@ class BaseMLAlpha(BaseAlpha):
         feat = features[features["date"] <= pd.Timestamp(date)]
 
         # Get latest features per asset
-        latest = feat.sort_values("date").groupby("asset_id").last().reset_index()
+        latest = feat.sort_values("date").groupby("ticker").last().reset_index()
 
         # Check columns
         missing = set(self.feature_columns) - set(latest.columns)
         if missing:
             return AlphaResult(
                 date=date,
-                signals=pd.DataFrame(columns=["asset_id", "score"]),
+                signals=pd.DataFrame(columns=["ticker", "score"]),
                 metadata={"strategy": self.name, "error": f"missing columns: {missing}"},
             )
 
@@ -167,7 +167,7 @@ class BaseMLAlpha(BaseAlpha):
         scores = self.model.predict(X_scaled)
 
         signals = pd.DataFrame({
-            "asset_id": latest["asset_id"].values,
+            "ticker": latest["ticker"].values,
             "score": scores,
         })
 

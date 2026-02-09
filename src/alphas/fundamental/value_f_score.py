@@ -105,7 +105,7 @@ class ValueFScoreAlpha(BaseAlpha):
             # Return empty if no fundamental data
             return AlphaResult(
                 date=date,
-                signals=pd.DataFrame(columns=["asset_id", "score"]),
+                signals=pd.DataFrame(columns=["ticker", "score"]),
                 metadata={"error": "No fundamental features provided"}
             )
 
@@ -113,10 +113,10 @@ class ValueFScoreAlpha(BaseAlpha):
         features = features[features["date"] <= pd.Timestamp(date)]
 
         # Get latest features per asset
-        latest_features = features.sort_values("date").groupby("asset_id").last().reset_index()
+        latest_features = features.sort_values("date").groupby("ticker").last().reset_index()
 
         for _, row in latest_features.iterrows():
-            asset_id = row["asset_id"]
+            ticker = row["ticker"]
 
             # Calculate simplified F-Score components
             f_score = 0
@@ -153,7 +153,7 @@ class ValueFScoreAlpha(BaseAlpha):
                 score = 0.0
 
             signals_list.append({
-                "asset_id": asset_id,
+                "ticker": ticker,
                 "score": score,
                 "f_score": f_score,
                 "pb_ratio": pb_ratio,
@@ -162,7 +162,7 @@ class ValueFScoreAlpha(BaseAlpha):
         signals = pd.DataFrame(signals_list)
 
         if signals.empty:
-            signals = pd.DataFrame(columns=["asset_id", "score"])
+            signals = pd.DataFrame(columns=["ticker", "score"])
 
         return AlphaResult(
             date=date,

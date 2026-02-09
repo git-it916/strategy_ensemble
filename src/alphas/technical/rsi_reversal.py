@@ -97,8 +97,8 @@ class RSIReversalAlpha(BaseAlpha):
         # Filter data up to date (no lookahead)
         prices = prices[prices["date"] <= pd.Timestamp(date)]
 
-        for asset_id in prices["asset_id"].unique():
-            asset_prices = prices[prices["asset_id"] == asset_id].sort_values("date")
+        for ticker in prices["ticker"].unique():
+            asset_prices = prices[prices["ticker"] == ticker].sort_values("date")
 
             if len(asset_prices) < self.rsi_period + 1:
                 continue
@@ -106,7 +106,7 @@ class RSIReversalAlpha(BaseAlpha):
             # Check if RSI is in features
             if features is not None and "rsi_14" in features.columns:
                 asset_features = features[
-                    (features["asset_id"] == asset_id) &
+                    (features["ticker"] == ticker) &
                     (features["date"] <= pd.Timestamp(date))
                 ]
                 if not asset_features.empty:
@@ -130,7 +130,7 @@ class RSIReversalAlpha(BaseAlpha):
                 score = 0.0
 
             signals_list.append({
-                "asset_id": asset_id,
+                "ticker": ticker,
                 "score": score,
                 "rsi": rsi,
             })
@@ -138,7 +138,7 @@ class RSIReversalAlpha(BaseAlpha):
         signals = pd.DataFrame(signals_list)
 
         if signals.empty:
-            signals = pd.DataFrame(columns=["asset_id", "score", "rsi"])
+            signals = pd.DataFrame(columns=["ticker", "score", "rsi"])
 
         return AlphaResult(
             date=date,

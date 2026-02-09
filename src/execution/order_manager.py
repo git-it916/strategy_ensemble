@@ -316,7 +316,7 @@ class OrderManager:
         Execute rebalancing to target weights.
 
         Args:
-            target_weights: DataFrame with asset_id, weight
+            target_weights: DataFrame with ticker, weight
             total_value: Total portfolio value (auto-calculated if None)
             order_type: "limit" or "market"
             sell_first: Place sell orders before buy orders
@@ -368,7 +368,7 @@ class OrderManager:
 
         # Calculate trades needed
         for _, row in target_weights.iterrows():
-            stock_code = row["asset_id"]
+            stock_code = row["ticker"]
             target_weight = row["weight"]
             current_weight = current_weights.get(stock_code, 0)
 
@@ -396,7 +396,7 @@ class OrderManager:
 
         # Handle exits (stocks not in target)
         for stock_code, _weight in current_weights.items():
-            if stock_code not in target_weights["asset_id"].values:
+            if stock_code not in target_weights["ticker"].values:
                 # Full exit
                 pos = positions[positions["stock_code"] == stock_code]
                 if not pos.empty:
