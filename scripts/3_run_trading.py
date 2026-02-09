@@ -48,7 +48,7 @@ def load_keys():
 
 def load_ensemble():
     """Load trained ensemble model via ModelManager."""
-    from src.models import ModelManager
+    from src.ensemble_models import ModelManager
 
     manager = ModelManager(MODELS_DIR)
 

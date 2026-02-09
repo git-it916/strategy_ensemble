@@ -84,6 +84,44 @@ STRATEGIES = {
         "weight": 0.25,
         "momentum_lookback": 60,
     },
+    # --- ML Alphas ---
+    "return_prediction": {
+        "enabled": True,
+        "weight": 0.2,
+        "type": "ml",
+        "n_estimators": 500,
+        "max_depth": 6,
+        "learning_rate": 0.05,
+    },
+    "intraday_pattern": {
+        "enabled": True,
+        "weight": 0.15,
+        "type": "ml",
+        "n_estimators": 400,
+        "max_depth": 5,
+        "learning_rate": 0.05,
+    },
+    "volatility_forecast": {
+        "enabled": True,
+        "weight": 0.1,
+        "type": "ml",
+        "n_estimators": 500,
+        "max_depth": 5,
+        "learning_rate": 0.05,
+    },
+}
+
+# =============================================================================
+# Regime Classifier Settings
+# =============================================================================
+REGIME_CLASSIFIER = {
+    "enabled": True,
+    "n_estimators": 300,
+    "max_depth": 8,
+    "min_samples_leaf": 20,
+    "regime_horizon": 20,       # 레짐 판단 기간 (20 거래일)
+    "bull_threshold": 0.03,     # 이 이상이면 상승장
+    "bear_threshold": -0.03,    # 이 이하이면 하락장
 }
 
 # =============================================================================
@@ -100,15 +138,21 @@ ENSEMBLE = {
             "vol_breakout": 1.5,
             "sentiment_long": 1.3,
             "rsi_reversal": 0.7,
+            "return_prediction": 1.3,
+            "intraday_pattern": 1.0,
         },
         "bear": {
             "rsi_reversal": 1.3,
             "value_f_score": 1.2,
             "vol_breakout": 0.5,
+            "return_prediction": 0.8,
+            "volatility_forecast": 1.5,
         },
         "sideways": {
             "rsi_reversal": 1.5,
             "value_f_score": 1.0,
+            "intraday_pattern": 1.3,
+            "return_prediction": 1.0,
         },
     },
 }
