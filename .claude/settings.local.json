@@ -14,7 +14,9 @@
       "Bash(ls:*)",
       "Bash(dir:*)",
       "Bash(findstr:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(du:*)",
+      "Bash(python3:*)"
     ]
   }
 }

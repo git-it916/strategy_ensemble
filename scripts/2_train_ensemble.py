@@ -93,7 +93,7 @@ def _get_strategy_config(name: str) -> dict:
 
 
 def initialize_strategies(strategy_names: list[str] | None = None):
-    """Initialize alpha strategies (rule-based + ML)."""
+    """Initialize alpha strategies (rule-based + ML + LLM)."""
     from src.alphas.technical import RSIReversalAlpha, VolatilityBreakoutAlpha
     from src.alphas.fundamental import ValueFScoreAlpha, SentimentLongAlpha
     from src.alphas.ml import (
@@ -101,6 +101,7 @@ def initialize_strategies(strategy_names: list[str] | None = None):
         IntradayPatternAlpha,
         VolatilityForecastAlpha,
     )
+    from src.alphas.llm import LLMAlpha
 
     strategies = []
 
@@ -119,6 +120,10 @@ def initialize_strategies(strategy_names: list[str] | None = None):
         ),
         "volatility_forecast": lambda: VolatilityForecastAlpha(
             config=_get_strategy_config("volatility_forecast"),
+        ),
+        # LLM-based
+        "llm_alpha": lambda: LLMAlpha(
+            config=_get_strategy_config("llm_alpha"),
         ),
     }
 
@@ -221,10 +226,15 @@ def train_ensemble(
     # Default labels for rule-based (and ML fallback)
     train_labels = data["labels"][data["labels"]["date"] <= train_end] if "labels" in data else None
 
-    # ML alphas that need specific labels — fit them individually first
+    # Classify strategies by type
     from src.alphas.ml import BaseMLAlpha
+    from src.alphas.llm import LLMAlpha
     ml_strategies = [s for s in strategies if isinstance(s, BaseMLAlpha)]
-    rule_strategies = [s for s in strategies if not isinstance(s, BaseMLAlpha)]
+    llm_strategies = [s for s in strategies if isinstance(s, LLMAlpha)]
+    rule_strategies = [
+        s for s in strategies
+        if not isinstance(s, BaseMLAlpha) and not isinstance(s, LLMAlpha)
+    ]
 
     fit_results = {}
 
@@ -247,12 +257,25 @@ def train_ensemble(
             logger.error(f"Failed to fit {strategy.name}: {e}")
             fit_results[strategy.name] = {"status": "error", "error": str(e)}
 
+    # Fit LLM strategies (no labels needed, just validates connectivity)
+    for strategy in llm_strategies:
+        logger.info(f"Fitting LLM strategy: {strategy.name}")
+        try:
+            result = strategy.fit(train_prices, train_features, None)
+            fit_results[strategy.name] = {"status": "success", "result": result}
+        except Exception as e:
+            logger.error(f"Failed to fit {strategy.name}: {e}")
+            fit_results[strategy.name] = {"status": "error", "error": str(e)}
+
     logger.info(f"Training data: {len(train_prices)} price records through {train_end_date}")
 
-    # Create ensemble with all strategies
-    ensemble = EnsembleAgent(
+    # Create ensemble with all strategies (use LLM orchestrator if configured)
+    from src.ensemble import create_ensemble_agent
+    use_llm = ENSEMBLE.get("use_llm_orchestrator", False)
+    ensemble = create_ensemble_agent(
         strategies=strategies,
         config=ENSEMBLE,
+        use_llm=use_llm,
     )
 
     # Fit rule-based strategies via ensemble (ML ones already fitted above)

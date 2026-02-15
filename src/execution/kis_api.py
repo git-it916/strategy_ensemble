@@ -177,6 +177,218 @@ class KISApi:
             "open": int(output.get("stck_oprc", 0)),
         }
 
+    def get_daily_prices(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+        period: str = "D",
+        adj_price: bool = True,
+    ) -> list[dict[str, Any]]:
+        """
+        주식 일봉/주봉/월봉 조회.
+
+        Args:
+            stock_code: 종목코드 (예: "005930")
+            start_date: 시작일 (YYYYMMDD)
+            end_date: 종료일 (YYYYMMDD)
+            period: D=일, W=주, M=월
+            adj_price: 수정주가 적용 여부
+
+        Returns:
+            일봉 데이터 리스트
+        """
+        url = f"{self.auth.base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+        tr_id = "FHKST03010100"
+        headers = self._get_headers(tr_id)
+
+        all_records: list[dict[str, Any]] = []
+        current_end = end_date
+
+        # KIS API는 최대 100건씩 반환 → 페이지네이션
+        while True:
+            params = {
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": stock_code,
+                "FID_INPUT_DATE_1": start_date,
+                "FID_INPUT_DATE_2": current_end,
+                "FID_PERIOD_DIV_CODE": period,
+                "FID_ORG_ADJ_PRC": "0" if adj_price else "1",
+            }
+
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get("rt_cd") != "0":
+                logger.warning(f"Daily price API error for {stock_code}: {data.get('msg1')}")
+                break
+
+            output2 = data.get("output2", [])
+            if not output2:
+                break
+
+            for item in output2:
+                date_str = item.get("stck_bsop_date", "")
+                if not date_str or len(date_str) != 8:
+                    continue
+
+                close = int(item.get("stck_clpr", 0))
+                if close <= 0:
+                    continue
+
+                all_records.append({
+                    "date": date_str,
+                    "ticker": stock_code,
+                    "open": int(item.get("stck_oprc", 0)),
+                    "high": int(item.get("stck_hgpr", 0)),
+                    "low": int(item.get("stck_lwpr", 0)),
+                    "close": close,
+                    "volume": int(item.get("acml_vol", 0)),
+                })
+
+            # 페이지네이션: 마지막 레코드의 날짜 이전으로
+            if len(output2) < 100:
+                break
+
+            last_date = output2[-1].get("stck_bsop_date", "")
+            if not last_date or last_date <= start_date:
+                break
+            # 하루 전으로 이동
+            from datetime import datetime as dt, timedelta as td
+            prev = dt.strptime(last_date, "%Y%m%d") - td(days=1)
+            current_end = prev.strftime("%Y%m%d")
+
+            # Rate limit (KIS: 초당 20건)
+            time.sleep(0.1)
+
+        return all_records
+
+    def get_daily_prices_batch(
+        self,
+        stock_codes: list[str],
+        start_date: str,
+        end_date: str,
+        progress_callback=None,
+    ) -> list[dict[str, Any]]:
+        """
+        여러 종목 일봉 일괄 조회.
+
+        Args:
+            stock_codes: 종목코드 리스트
+            start_date: 시작일 (YYYYMMDD)
+            end_date: 종료일 (YYYYMMDD)
+            progress_callback: 진행 콜백 (i, total, ticker)
+
+        Returns:
+            전체 일봉 데이터 리스트
+        """
+        all_records: list[dict[str, Any]] = []
+        total = len(stock_codes)
+
+        for i, code in enumerate(stock_codes):
+            try:
+                records = self.get_daily_prices(code, start_date, end_date)
+                all_records.extend(records)
+
+                if progress_callback:
+                    progress_callback(i + 1, total, code)
+                elif (i + 1) % 10 == 0:
+                    logger.info(f"  [{i + 1}/{total}] {code}: {len(records)} records")
+
+            except Exception as e:
+                logger.warning(f"Failed to fetch {code}: {e}")
+
+            # Rate limit between stocks
+            time.sleep(0.15)
+
+        return all_records
+
+    def get_minute_prices(
+        self,
+        stock_code: str,
+        time_unit: str = "1",
+    ) -> list[dict[str, Any]]:
+        """
+        주식 분봉 조회 (당일).
+
+        KIS API 분봉 조회는 당일 데이터만 제공.
+        시간 단위: 1, 3, 5, 10, 15, 30, 60분
+
+        Args:
+            stock_code: 종목코드 (예: "005930")
+            time_unit: 분봉 단위 ("1", "3", "5", "10", "15", "30", "60")
+
+        Returns:
+            분봉 데이터 리스트
+        """
+        url = f"{self.auth.base_url}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+        tr_id = "FHKST03010200"
+        headers = self._get_headers(tr_id)
+
+        all_records: list[dict[str, Any]] = []
+        hour_str = ""  # 빈 문자열이면 최근부터
+
+        while True:
+            params = {
+                "FID_ETC_CLS_CODE": "",
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": stock_code,
+                "FID_INPUT_HOUR_1": hour_str,
+                "FID_PW_DATA_INCU_YN": "Y",
+            }
+
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get("rt_cd") != "0":
+                logger.warning(
+                    f"Minute price API error for {stock_code}: {data.get('msg1')}"
+                )
+                break
+
+            output2 = data.get("output2", [])
+            if not output2:
+                break
+
+            for item in output2:
+                time_str = item.get("stck_cntg_hour", "")
+                if not time_str or len(time_str) < 6:
+                    continue
+
+                close = int(item.get("stck_prpr", 0))
+                if close <= 0:
+                    continue
+
+                # HHMMSS → HH:MM:SS
+                formatted_time = f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:6]}"
+                today = datetime.now().strftime("%Y-%m-%d")
+
+                all_records.append({
+                    "datetime": f"{today} {formatted_time}",
+                    "ticker": stock_code,
+                    "open": int(item.get("stck_oprc", 0)),
+                    "high": int(item.get("stck_hgpr", 0)),
+                    "low": int(item.get("stck_lwpr", 0)),
+                    "close": close,
+                    "volume": int(item.get("cntg_vol", 0)),
+                    "cumul_volume": int(item.get("acml_vol", 0)),
+                })
+
+            # 페이지네이션
+            if len(output2) < 30:
+                break
+
+            last_time = output2[-1].get("stck_cntg_hour", "")
+            if not last_time:
+                break
+            hour_str = last_time
+
+            time.sleep(0.1)
+
+        return all_records
+
     def get_balance(self) -> dict[str, Any]:
         """
         잔고 조회.

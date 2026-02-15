@@ -6,6 +6,8 @@ __pycache__/
 # C extensions
 *.so
 
+Miniconda3-latest-Linux-x86_64.sh
+
 # Distribution / packaging
 .Python
 build/
@@ -238,6 +240,22 @@ backtest_results/
 .vscode/
 *.swp
 *.swo
+
+# External repos / tools
+llama.cpp/
+
+# Fine-tuning outputs & model weights
+finetune/output_unsloth/
+finetune/output_stage2/
+finetune/data/synthetic_data.json
+unsloth_compiled_cache/
+*.safetensors
+*.gguf
+*.pt
+*.onnx
+
+# Miniconda installer
+Miniconda3-*.sh
 
 # OS files
 .DS_Store

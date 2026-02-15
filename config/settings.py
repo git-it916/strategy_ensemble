@@ -109,6 +109,15 @@ STRATEGIES = {
         "max_depth": 5,
         "learning_rate": 0.05,
     },
+    # --- LLM Alpha ---
+    "llm_alpha": {
+        "enabled": True,
+        "weight": 0.15,
+        "type": "llm",
+        "model": "qwen2.5:32b",
+        "temperature": 0.3,
+        "max_stocks_in_prompt": 50,
+    },
 }
 
 # =============================================================================
@@ -132,6 +141,12 @@ ENSEMBLE = {
     "performance_lookback": 21,  # 가중치 계산 기간
     "performance_blend": 0.5,  # 성과 기반 가중치 비율
 
+    # LLM orchestrator
+    "use_llm_orchestrator": True,
+    "llm_model": "qwen2.5:32b",  # 24GB VRAM: 단일 모델 사용
+    "llm_temperature": 0.2,
+    "llm_timeout": 300.0,
+
     # Regime preferences
     "regime_preferences": {
         "bull": {
@@ -140,6 +155,7 @@ ENSEMBLE = {
             "rsi_reversal": 0.7,
             "return_prediction": 1.3,
             "intraday_pattern": 1.0,
+            "llm_alpha": 1.0,
         },
         "bear": {
             "rsi_reversal": 1.3,
@@ -147,12 +163,14 @@ ENSEMBLE = {
             "vol_breakout": 0.5,
             "return_prediction": 0.8,
             "volatility_forecast": 1.5,
+            "llm_alpha": 1.0,
         },
         "sideways": {
             "rsi_reversal": 1.5,
             "value_f_score": 1.0,
             "intraday_pattern": 1.3,
             "return_prediction": 1.0,
+            "llm_alpha": 1.2,
         },
     },
 }
@@ -178,6 +196,36 @@ SCHEDULE = {
     "signal_generation": "09:00",  # 장 시작 시 신호 생성
     "rebalance_time": "09:10",  # 리밸런싱 실행
     "eod_report": "15:35",  # 장 마감 후 리포트
+}
+
+# =============================================================================
+# LLM Settings (Ollama)
+# =============================================================================
+LLM_CONFIG = {
+    "ollama_url": "http://localhost:11434",
+    "models": {
+        "signal_generation": "qwen2.5:32b",
+        "ensemble_orchestration": "qwen2.5:32b",  # 24GB VRAM: 단일 모델 사용
+    },
+    "temperature": 0.3,
+    "timeout": 300.0,
+    "max_retries": 2,
+    "retry_delay": 5.0,
+    "max_stocks_in_prompt": 50,
+    "reasoning_log_dir": str(LOGS_DIR / "reasoning"),
+}
+
+# =============================================================================
+# WebSocket Settings (KIS Real-time)
+# =============================================================================
+WEBSOCKET_CONFIG = {
+    "candle_interval_minutes": 1,   # 1분봉 수집 (데이터 해상도)
+    "signal_interval_minutes": 5,   # 5분마다 시그널 생성 (LLM 호출 주기)
+    "auto_reconnect": True,
+    "reconnect_delay": 5.0,
+    "max_reconnect_attempts": 10,
+    "heartbeat_interval": 30,
+    "min_ticks_for_signal": 10,     # 최소 틱 수 미달 시 시그널 생성 건너뜀
 }
 
 # =============================================================================

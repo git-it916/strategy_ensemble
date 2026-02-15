@@ -373,3 +373,26 @@ class EnsembleAgent:
         for name, history in perf_map.items():
             if name in self.strategies:
                 self.strategies[name]._performance_history = history
+
+
+def create_ensemble_agent(
+    strategies: list[BaseAlpha],
+    config: dict[str, Any] | None = None,
+    use_llm: bool = False,
+    **kwargs: Any,
+) -> EnsembleAgent:
+    """
+    Factory function to create the appropriate ensemble agent.
+
+    Args:
+        strategies: List of alpha strategies
+        config: Ensemble configuration
+        use_llm: If True, create LLMEnsembleOrchestrator
+
+    Returns:
+        EnsembleAgent or LLMEnsembleOrchestrator
+    """
+    if use_llm:
+        from .llm_orchestrator import LLMEnsembleOrchestrator
+        return LLMEnsembleOrchestrator(strategies, config, **kwargs)
+    return EnsembleAgent(strategies, config)

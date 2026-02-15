@@ -54,7 +54,7 @@ class FeatureEngineer:
         prices["log_ret_1d"] = np.log1p(prices["ret_1d"])
 
         # --- Moving average ratios ---
-        for window in [5, 20, 60]:
+        for window in [5, 10, 20, 60]:
             ma = groups["close"].transform(lambda x: x.rolling(window).mean())
             prices[f"ma_ratio_{window}"] = prices["close"] / ma - 1
 
@@ -141,7 +141,7 @@ class FeatureEngineer:
         # Select feature columns
         feature_cols = [
             "ret_1d", "ret_5d", "ret_20d", "ret_60d",
-            "ma_ratio_5", "ma_ratio_20", "ma_ratio_60",
+            "ma_ratio_5", "ma_ratio_10", "ma_ratio_20", "ma_ratio_60",
             "rsi_14", "bb_pct_b",
             "macd", "macd_signal",
             "vol_5d", "vol_20d", "vol_of_vol", "vol_ratio_5_20",
