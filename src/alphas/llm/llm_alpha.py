@@ -18,7 +18,12 @@ import pandas as pd
 
 from ..base_alpha import BaseAlpha, AlphaResult
 from ...llm.ollama_client import OllamaClient, MODEL_QWEN
-from ...llm.prompts import SIGNAL_SYSTEM_PROMPT, build_signal_prompt
+from ...llm.prompts import (
+    SIGNAL_SYSTEM_PROMPT,
+    FUND_MANAGER_SYSTEM_PROMPT,
+    build_signal_prompt,
+    build_fund_manager_prompt,
+)
 from ...llm.reasoning_logger import ReasoningLogger
 
 logger = logging.getLogger(__name__)
@@ -222,6 +227,60 @@ class LLMAlpha(BaseAlpha):
         except Exception as e:
             logger.error(f"LLM signal generation failed: {e}")
             return self._empty_result(date, str(e))
+
+    def generate_from_context(
+        self,
+        ctx: "PipelineContext",
+    ) -> dict[str, Any]:
+        """
+        순차 파이프라인용: PipelineContext → LLM 판단.
+
+        EnsembleAgent를 거치지 않고, ContextBuilder가 조립한 컨텍스트를
+        직접 LLM에 전달하여 최종 결정을 받음.
+
+        Returns:
+            LLM의 parsed JSON 응답 (signals, reasoning, confidence 포함)
+        """
+        prompt = build_fund_manager_prompt(ctx)
+
+        try:
+            response = self.client.generate(
+                prompt=prompt,
+                model=self.model,
+                json_mode=True,
+                system=FUND_MANAGER_SYSTEM_PROMPT,
+                temperature=self.temperature,
+            )
+            latency_ms = response.get("latency_ms", 0)
+
+            parsed = response.get("parsed_json")
+            if parsed is None:
+                logger.warning("Fund Manager LLM: JSON parse failed")
+                return {"signals": [], "error": "JSON parse failed"}
+
+            # Log reasoning
+            self.reasoning_logger.log(
+                model=self.model,
+                task="fund_manager_decision",
+                reasoning={
+                    "analysis": parsed.get("reasoning", ""),
+                    "regime": parsed.get("regime_assessment", ""),
+                },
+                signals=parsed.get("signals", []),
+                confidence=parsed.get("confidence"),
+                latency_ms=latency_ms,
+            )
+
+            logger.info(
+                f"Fund Manager: {len(parsed.get('signals', []))} decisions, "
+                f"confidence={parsed.get('confidence')}, latency={latency_ms}ms"
+            )
+
+            return parsed
+
+        except Exception as e:
+            logger.error(f"Fund Manager LLM failed: {e}")
+            return {"signals": [], "error": str(e)}
 
     def _detect_regime(self, prices: pd.DataFrame) -> str | None:
         """Simple regime detection from price data for prompt context."""

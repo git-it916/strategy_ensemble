@@ -176,6 +176,24 @@ class TelegramNewsCollector:
         """메시지 버퍼 비우기."""
         self._messages.clear()
 
+    def get_recent_summary(self, n: int = 20) -> list[dict]:
+        """
+        최근 N개 메시지를 요약 형태로 반환 (파이프라인 연동용).
+
+        Returns:
+            [{"channel": str, "text": str, "timestamp": datetime}, ...]
+        """
+        recent = self._messages[-n:] if self._messages else []
+        return [
+            {
+                "channel": m.get("channel", ""),
+                "text": m.get("text", ""),
+                "timestamp": m.get("timestamp"),
+            }
+            for m in recent
+            if m.get("text", "").strip()
+        ]
+
     async def fetch_history(
         self,
         channel: str | int,

@@ -25,12 +25,22 @@ DUCKDB_PATH = DATA_DIR / "quant.duckdb"
 # Universe Settings
 # =============================================================================
 UNIVERSE = {
-    "index": "KOSPI200",
+    "index": "KOSPI_KOSDAQ",  # KOSPI + KOSDAQ 전종목
     "min_market_cap": 1e11,  # 최소 시가총액 (1000억)
     "min_volume": 1e8,  # 최소 거래대금 (1억)
     "exclude_sectors": ["금융"],  # 제외 섹터
     "max_stocks": 100,  # 최대 종목 수
 }
+
+# =============================================================================
+# Inverse ETF Mapping (숏 대응용)
+# =============================================================================
+INVERSE_MAPPING = {
+    "KOSPI": "252670",   # KODEX 200선물인버스2X
+    "KOSDAQ": "251340",  # KODEX 코스닥150선물인버스
+}
+# 시장 헤지용 인버스 ETF 티커 집합 (주문 로직에서 식별용)
+INVERSE_ETF_TICKERS = set(INVERSE_MAPPING.values())
 
 # =============================================================================
 # Trading Parameters
@@ -109,12 +119,11 @@ STRATEGIES = {
         "max_depth": 5,
         "learning_rate": 0.05,
     },
-    # --- LLM Alpha ---
+    # --- LLM Alpha (순차 파이프라인에서 최종 판단 역할) ---
     "llm_alpha": {
         "enabled": True,
-        "weight": 0.15,
         "type": "llm",
-        "model": "qwen2.5:32b",
+        "model": "qwen2.5-kospi-ft-s3",
         "temperature": 0.3,
         "max_stocks_in_prompt": 50,
     },
@@ -141,11 +150,11 @@ ENSEMBLE = {
     "performance_lookback": 21,  # 가중치 계산 기간
     "performance_blend": 0.5,  # 성과 기반 가중치 비율
 
-    # LLM orchestrator
+    # LLM orchestrator (순차 파이프라인에서 Gemini가 담당)
     "use_llm_orchestrator": True,
-    "llm_model": "qwen2.5:32b",  # 24GB VRAM: 단일 모델 사용
-    "llm_temperature": 0.2,
-    "llm_timeout": 300.0,
+    "llm_model": "gemini-2.5-flash",
+    "llm_temperature": 0.3,
+    "llm_timeout": 60.0,
 
     # Regime preferences
     "regime_preferences": {
@@ -208,7 +217,7 @@ LLM_CONFIG = {
     "gemini_timeout": 60.0,
     # Ollama (파인튜닝 모델 - 전략 특화 시그널 생성)
     "ollama_url": "http://localhost:11434",
-    "ollama_model": "qwen2.5-kospi-ft-s2",
+    "ollama_model": "qwen2.5-kospi-ft-s3",
     "ollama_temperature": 0.3,
     "ollama_timeout": 120.0,
     # 공통
@@ -229,6 +238,35 @@ WEBSOCKET_CONFIG = {
     "max_reconnect_attempts": 10,
     "heartbeat_interval": 30,
     "min_ticks_for_signal": 10,     # 최소 틱 수 미달 시 시그널 생성 건너뜀
+}
+
+# =============================================================================
+# Pipeline Settings (순차 파이프라인 구조)
+# =============================================================================
+PIPELINE = {
+    # Step 1: Universe filter
+    "min_market_cap": 1e11,
+    # Step 2: ML feature extraction (기존 ML 알파를 데이터 소스로 사용)
+    "ml_strategies": [
+        "return_prediction",
+        "volatility_forecast",
+        "intraday_pattern",
+    ],
+    # Step 3: Technical + fundamental 소스
+    "technical_strategies": [
+        "rsi_reversal",
+        "vol_breakout",
+        "value_f_score",
+        "sentiment_long",
+    ],
+    # Step 4: LLM reasoning (최종 판단)
+    "llm_model": "qwen2.5-kospi-ft-s3",
+    # Step 5: Risk management
+    "max_position_weight": 0.1,
+    "max_positions": 20,
+    # Step 6: Approval
+    "require_human_approval": True,
+    "approval_timeout_seconds": 300,  # 5분 대기
 }
 
 # =============================================================================

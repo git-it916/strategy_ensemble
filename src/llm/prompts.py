@@ -123,7 +123,132 @@ JSON 형식으로 final_signals, strategy_weights, 상세 reasoning을 반환하
 
 
 # =============================================================================
-# Prompt Builders
+# Fund Manager — Sequential Pipeline (qwen2.5-kospi-ft-s3)
+# =============================================================================
+
+FUND_MANAGER_SYSTEM_PROMPT = """\
+You are a professional Korean equity Fund Manager making final investment decisions.
+You receive pre-analyzed data from ML models, technical indicators, and news.
+Your job is to SYNTHESIZE all information and make the final BUY/SELL/HOLD decision.
+
+You MUST respond in valid JSON format with this exact structure:
+{
+  "reasoning": "2-3 sentence analysis synthesizing ML, technical, and news data",
+  "regime_assessment": "STRONG_BULL|MILD_BULL|SIDEWAYS|WEAKENING|BEAR",
+  "confidence": 0.85,
+  "signals": [
+    {"ticker": "005930", "score": 0.7, "side": "long", "reason": "1-sentence reason referencing actual data"}
+  ]
+}
+
+Rules:
+- SYNTHESIZE the ML probabilities, technical indicators, and news — do NOT just echo them
+- score range: -1.0 (strong sell) to +1.0 (strong buy)
+- side: "long" for BUY, "short" for SELL/HEDGE (will be converted to inverse ETF)
+- Only include stocks you have a clear opinion on (|score| >= 0.2)
+- reason: reference the ACTUAL data provided (ML score, RSI, PER, news)
+- Do NOT invent data. Only use what is provided in the prompt.
+- If market regime is BEAR or WEAKENING, consider "short" signals for market hedge"""
+
+FUND_MANAGER_USER_TEMPLATE = """\
+Date: {date}
+Candidates: {n_stocks} stocks
+
+=== Market Overview ===
+{market_summary}
+
+=== ML Model Predictions ===
+{ml_data}
+
+=== Technical Indicators ===
+{technical_data}
+
+=== Fundamentals ===
+{fundamental_data}
+
+=== Recent News ===
+{news_data}
+
+=== Current Regime ===
+{regime_info}
+
+Synthesize ALL data above. For each stock, decide BUY (long), SELL (short), or skip.
+If the market is weakening/bearish, include a "short" signal for market hedge.
+Provide your reasoning and output a SINGLE valid JSON object."""
+
+
+def build_fund_manager_prompt(ctx: "PipelineContext") -> str:
+    """Build the Fund Manager prompt from PipelineContext.
+
+    This is the core prompt for the sequential pipeline.
+    Takes the aggregated context from ContextBuilder and formats it
+    for qwen2.5-kospi-ft-s3.
+    """
+    from ..pipeline.context_builder import PipelineContext  # noqa: F811
+
+    # ML data section
+    ml_lines = []
+    for stock in ctx.stocks:
+        if stock.ml_scores:
+            scores_str = ", ".join(
+                f"{k}={v:+.3f}" for k, v in stock.ml_scores.items()
+            )
+            ml_lines.append(
+                f"{stock.ticker} | avg={stock.ml_avg_score:+.3f} "
+                f"({stock.ml_signal_strength}) | {scores_str}"
+            )
+    ml_data = "\n".join(ml_lines) if ml_lines else "No ML predictions available"
+
+    # Technical data section
+    tech_header = "ticker | close | chg_1d | chg_5d | RSI | SMA5 | SMA20 | SMA60"
+    tech_lines = [tech_header, "-" * len(tech_header)]
+    for stock in ctx.stocks:
+        rsi_s = f"{stock.rsi_14:.0f}" if stock.rsi_14 is not None else "-"
+        sma5_s = f"{stock.sma_5:,.0f}" if stock.sma_5 is not None else "-"
+        sma20_s = f"{stock.sma_20:,.0f}" if stock.sma_20 is not None else "-"
+        sma60_s = f"{stock.sma_60:,.0f}" if stock.sma_60 is not None else "-"
+        tech_lines.append(
+            f"{stock.ticker} | {stock.close:,.0f} | {stock.change_1d:+.1%} "
+            f"| {stock.change_5d:+.1%} | {rsi_s} | {sma5_s} | {sma20_s} | {sma60_s}"
+        )
+    technical_data = "\n".join(tech_lines[:52])
+
+    # Fundamental data section
+    fund_header = "ticker | PER | PBR | ROE | EV/EBITDA"
+    fund_lines = [fund_header, "-" * len(fund_header)]
+    for stock in ctx.stocks:
+        if any(v is not None for v in [stock.per, stock.pbr, stock.roe]):
+            per_s = f"{stock.per:.1f}" if stock.per is not None else "-"
+            pbr_s = f"{stock.pbr:.2f}" if stock.pbr is not None else "-"
+            roe_s = f"{stock.roe:.1f}" if stock.roe is not None else "-"
+            ev_s = f"{stock.ev_ebitda:.1f}" if stock.ev_ebitda is not None else "-"
+            fund_lines.append(
+                f"{stock.ticker} | {per_s} | {pbr_s} | {roe_s} | {ev_s}"
+            )
+    fundamental_data = "\n".join(fund_lines) if len(fund_lines) > 2 else "No fundamental data"
+
+    # News section
+    if ctx.news_headlines:
+        news_data = "\n".join(f"- {h}" for h in ctx.news_headlines[:10])
+    else:
+        news_data = "No recent news"
+
+    regime_info = ctx.regime.upper() if ctx.regime else "UNKNOWN"
+
+    return FUND_MANAGER_USER_TEMPLATE.format(
+        date=str(ctx.date.date()) if hasattr(ctx.date, "date") else str(ctx.date),
+        n_stocks=ctx.n_stocks,
+        market_summary=ctx.market_summary,
+        ml_data=ml_data,
+        technical_data=technical_data,
+        fundamental_data=fundamental_data,
+        news_data=news_data,
+        regime_info=regime_info,
+    )
+
+
+# =============================================================================
+# Legacy Prompt Builders (backward compat — 기존 병렬 구조용)
 # =============================================================================
 
 def build_signal_prompt(

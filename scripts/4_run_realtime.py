@@ -1,17 +1,27 @@
 #!/usr/bin/env python
 """
-4. Run Real-time Trading with LLM
+실행코드
+python scripts/4_run_realtime.py --real
 
-실시간 데이터 + LLM 앙상블 트레이딩.
-KIS WebSocket으로 실시간 체결가/호가를 수신하고,
-1분봉 수집 + N분 간격 LLM 앙상블 의사결정 실행.
+4. Run Real-time Trading — Sequential Pipeline
+
+순차 파이프라인 기반 실시간 트레이딩.
+병렬 투표(EnsembleAgent) 대신, LLM이 최종 "펀드매니저" 역할.
+
+7-Step Pipeline:
+    1. Universe Selector  — 시총 1000억+ 필터
+    2. Feature Extractor  — ML 모델 → 확률/스코어 (데이터 소스)
+    3. Data Loader        — 실시간 가격(KIS) + 뉴스(Telegram)
+    4. Reasoning Engine   — qwen2.5-kospi-ft-s3 → JSON 결정
+    5. Risk Manager       — 포지션 사이징 + SHORT→인버스 ETF 변환
+    6. Approval Agent     — 텔레그램으로 사용자 승인 대기
+    7. Executor           — KIS API 주문 실행
 
 Usage:
-    python scripts/4_run_realtime.py              # Paper trading (기본)
-    python scripts/4_run_realtime.py --paper       # Paper trading (명시)
-    python scripts/4_run_realtime.py --real         # 실거래
-    python scripts/4_run_realtime.py --dry-run      # 주문 없이 시그널만
-    python scripts/4_run_realtime.py --no-llm       # 기존 앙상블만 (LLM 비활성)
+    python scripts/4_run_realtime.py              # Paper + 승인 모드
+    python scripts/4_run_realtime.py --real        # 실거래
+    python scripts/4_run_realtime.py --dry-run     # 주문 없이 시그널만
+    python scripts/4_run_realtime.py --no-approval # 자동 실행 (승인 건너뜀)
 """
 
 from __future__ import annotations
@@ -20,8 +30,9 @@ import argparse
 import signal
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import yaml
@@ -34,13 +45,14 @@ from config.settings import (
     MODELS_DIR,
     TRADING,
     SCHEDULE,
-    ENSEMBLE,
     LLM_CONFIG,
     WEBSOCKET_CONFIG,
+    PIPELINE,
+    INVERSE_MAPPING,
 )
 from config.logging_config import setup_logging
 
-logger = setup_logging("realtime_trading")
+logger = setup_logging("realtime_pipeline")
 
 
 def load_keys() -> dict | None:
@@ -53,15 +65,21 @@ def load_keys() -> dict | None:
         return yaml.safe_load(f)
 
 
-class RealtimeTradingLoop:
+class SequentialPipeline:
     """
-    Main trading loop:
-    1. KIS WebSocket -> real-time ticks
-    2. CandleAggregator -> 1분봉 수집 (고해상도 데이터)
-    3. signal_interval마다 -> ensemble signals (LLM 호출)
-    4. LLM orchestrator -> portfolio decision
-    5. OrderManager -> execute trades
-    6. ReasoningLogger -> JSON logs
+    순차 파이프라인 메인 루프.
+
+    As-Is (병렬): ML/RSI/LLM 독립 시그널 → 가중 투표
+    To-Be (순차): ML스코어+기술지표+뉴스 → LLM(Judge) → 승인 → 실행
+
+    7-Step Pipeline:
+        1. Universe Selector
+        2. Feature Extractor (ML models as data sources)
+        3. Data Loader (real-time prices + news)
+        4. Reasoning Engine (LLM Fund Manager)
+        5. Risk Manager (position sizing + inverse ETF)
+        6. Approval Agent (human-in-the-loop)
+        7. Executor (KIS API orders)
     """
 
     def __init__(
@@ -69,80 +87,84 @@ class RealtimeTradingLoop:
         keys: dict,
         is_paper: bool = True,
         dry_run: bool = False,
-        use_llm: bool = True,
+        require_approval: bool = True,
     ):
         self.keys = keys
         self.is_paper = is_paper
         self.dry_run = dry_run
-        self.use_llm = use_llm
+        self.require_approval = require_approval
 
         self._running = False
-        self._processing = False  # 시그널 처리 중 락
-        self._ws = None
-        self._ensemble = None
+        self._processing = False
+
+        # Components (lazy init)
+        self._context_builder = None
+        self._llm_alpha = None
+        self._risk_manager = None
+        self._approval_agent = None
         self._order_manager = None
         self._notifier = None
-        self._allocator = None
-        self._prices = None
-        self._features = None
+        self._ws = None
+        self._news_collector = None
+
+        # Data
+        self._prices: pd.DataFrame | None = None
+        self._features: pd.DataFrame | None = None
+        self._ml_strategies: dict = {}
+        self._technical_strategies: dict = {}
         self._universe: list[str] = []
 
-        # 시그널 생성 주기 제어
+        # Timing
         self._candle_count = 0
-        self._signal_interval = WEBSOCKET_CONFIG.get("signal_interval_minutes", 5)
+        self._signal_interval = WEBSOCKET_CONFIG.get("signal_interval_minutes", 15)
         self._candle_interval = WEBSOCKET_CONFIG.get("candle_interval_minutes", 1)
-        # N분봉마다 시그널 = signal_interval / candle_interval
-        self._candles_per_signal = max(1, self._signal_interval // self._candle_interval)
+        self._candles_per_signal = max(
+            1, self._signal_interval // self._candle_interval
+        )
         self._last_signal_time: datetime | None = None
 
     def initialize(self) -> None:
-        """Initialize all components."""
+        """Initialize all pipeline components."""
         logger.info("=" * 60)
-        logger.info("Initializing Real-time Trading System")
-        logger.info(f"  Paper: {self.is_paper}")
+        logger.info("Sequential Pipeline — Initializing")
+        logger.info(f"  Mode: {'PAPER' if self.is_paper else 'REAL'}")
         logger.info(f"  Dry Run: {self.dry_run}")
-        logger.info(f"  LLM: {self.use_llm}")
-        logger.info(f"  Candle: {self._candle_interval}min (data collection)")
-        logger.info(f"  Signal: {self._signal_interval}min (LLM decision)")
+        logger.info(f"  Approval: {self.require_approval}")
+        logger.info(f"  Signal Interval: {self._signal_interval}min")
+        logger.info(f"  LLM Model: {PIPELINE['llm_model']}")
         logger.info("=" * 60)
 
-        # 1. Load trained ensemble
-        self._load_ensemble()
-
-        # 2. Load latest price/feature data
+        # 1. Load data
         self._load_data()
 
-        # 3. Initialize broker (KIS API + OrderManager)
+        # 2. Load ML + Technical strategies (as data sources, not decision makers)
+        self._load_strategies()
+
+        # 3. Initialize ContextBuilder
+        self._init_context_builder()
+
+        # 4. Initialize LLM (Fund Manager)
+        self._init_llm()
+
+        # 5. Initialize Risk Manager
+        self._init_risk_manager()
+
+        # 6. Initialize Approval Agent
+        self._init_approval_agent()
+
+        # 7. Initialize Broker (KIS API)
         self._init_broker()
 
-        # 4. Initialize WebSocket
+        # 8. Initialize WebSocket
         self._init_websocket()
 
-        # 5. Initialize notifier
+        # 9. Initialize Telegram Notifier
         self._init_notifier()
 
-        # 6. Initialize allocator
-        from src.ensemble.allocator import RiskParityAllocator
-        self._allocator = RiskParityAllocator(
-            top_k=TRADING["max_positions"],
-            max_weight=TRADING["max_position_weight"],
-        )
-
-        logger.info("All components initialized")
-
-    def _load_ensemble(self) -> None:
-        """Load trained ensemble model."""
-        from src.ensemble_models import ModelManager
-
-        manager = ModelManager(MODELS_DIR)
-        self._ensemble = manager.load_ensemble()
-        logger.info(
-            f"Loaded ensemble with {len(self._ensemble.strategies)} strategies: "
-            f"{list(self._ensemble.strategies.keys())}"
-        )
+        logger.info("All pipeline components initialized")
 
     def _load_data(self) -> None:
-        """Load latest price and feature data."""
+        """Load price and feature data."""
         prices_path = PROCESSED_DATA_DIR / "prices.parquet"
         features_path = PROCESSED_DATA_DIR / "features.parquet"
 
@@ -151,7 +173,7 @@ class RealtimeTradingLoop:
             self._prices["date"] = pd.to_datetime(self._prices["date"])
             logger.info(f"Loaded {len(self._prices)} price records")
         else:
-            logger.error("prices.parquet not found!")
+            logger.error("prices.parquet not found! Run 0_prepare_prices.py first.")
             sys.exit(1)
 
         if features_path.exists():
@@ -159,14 +181,110 @@ class RealtimeTradingLoop:
             self._features["date"] = pd.to_datetime(self._features["date"])
             logger.info(f"Loaded {len(self._features)} feature records")
 
-        # Get universe from most recent data
+        # Universe
         latest_date = self._prices["date"].max()
         recent = self._prices[self._prices["date"] == latest_date]
-        self._universe = recent["ticker"].tolist()[:100]
+        self._universe = recent["ticker"].tolist()[
+            : PIPELINE.get("max_positions", 20) * 5
+        ]
         logger.info(f"Universe: {len(self._universe)} stocks")
 
+    def _load_strategies(self) -> None:
+        """Load trained ML and technical strategies as DATA SOURCES."""
+        from src.ensemble_models import ModelManager
+
+        manager = ModelManager(MODELS_DIR)
+
+        try:
+            ensemble = manager.load_ensemble()
+            all_strategies = ensemble.strategies
+
+            # Separate ML vs Technical strategies
+            ml_names = set(PIPELINE.get("ml_strategies", []))
+            tech_names = set(PIPELINE.get("technical_strategies", []))
+
+            for name, strategy in all_strategies.items():
+                if name in ml_names:
+                    self._ml_strategies[name] = strategy
+                    logger.info(f"  ML data source: {name}")
+                elif name in tech_names:
+                    self._technical_strategies[name] = strategy
+                    logger.info(f"  Technical data source: {name}")
+
+            logger.info(
+                f"Loaded {len(self._ml_strategies)} ML + "
+                f"{len(self._technical_strategies)} technical strategies"
+            )
+
+        except FileNotFoundError as e:
+            logger.warning(f"Could not load trained models: {e}")
+            logger.warning("Pipeline will run with price data only")
+
+    def _init_context_builder(self) -> None:
+        """Initialize ContextBuilder."""
+        from src.pipeline import ContextBuilder
+
+        self._context_builder = ContextBuilder(
+            ml_strategies=self._ml_strategies,
+            technical_strategies=self._technical_strategies,
+            news_collector=self._news_collector,
+        )
+        logger.info("ContextBuilder initialized")
+
+    def _init_llm(self) -> None:
+        """Initialize LLM Alpha (Fund Manager role)."""
+        from src.alphas.llm.llm_alpha import LLMAlpha
+
+        self._llm_alpha = LLMAlpha(
+            name="fund_manager",
+            config={
+                "model": PIPELINE["llm_model"],
+                "temperature": LLM_CONFIG.get("ollama_temperature", 0.3),
+                "timeout": LLM_CONFIG.get("ollama_timeout", 120.0),
+            },
+        )
+        self._llm_alpha.is_fitted = True
+        logger.info(f"LLM Fund Manager: {PIPELINE['llm_model']}")
+
+    def _init_risk_manager(self) -> None:
+        """Initialize Risk Manager."""
+        from src.pipeline import RiskManager
+
+        self._risk_manager = RiskManager(
+            inverse_mapping=INVERSE_MAPPING,
+            max_position_weight=PIPELINE.get("max_position_weight", 0.1),
+            max_positions=PIPELINE.get("max_positions", 20),
+            max_leverage=TRADING.get("max_leverage", 1.0),
+            min_trade_value=TRADING.get("min_trade_value", 100_000),
+        )
+        logger.info("RiskManager initialized (inverse ETF mapping active)")
+
+    def _init_approval_agent(self) -> None:
+        """Initialize Approval Agent."""
+        if not self.require_approval:
+            logger.info("Approval agent DISABLED (auto-execute mode)")
+            return
+
+        tg_keys = self.keys.get("telegram", {})
+        bot_token = tg_keys.get("bot_token", "")
+        chat_id = tg_keys.get("chat_id", "")
+
+        if not bot_token or not chat_id or "YOUR" in bot_token:
+            logger.warning("Telegram not configured — approval agent disabled")
+            self.require_approval = False
+            return
+
+        from src.pipeline import ApprovalAgent
+
+        self._approval_agent = ApprovalAgent(
+            bot_token=bot_token,
+            chat_id=chat_id,
+            timeout_seconds=PIPELINE.get("approval_timeout_seconds", 300),
+        )
+        logger.info("ApprovalAgent initialized (Telegram human-in-the-loop)")
+
     def _init_broker(self) -> None:
-        """Initialize KIS API and OrderManager."""
+        """Initialize KIS API + OrderManager."""
         from src.execution import KISApi, KISAuth, OrderManager
 
         kis_keys = self.keys.get("kis", {})
@@ -176,7 +294,6 @@ class RealtimeTradingLoop:
             account_number=kis_keys.get("account_number", ""),
             is_paper=self.is_paper,
         )
-
         api = KISApi(auth)
         self._order_manager = OrderManager(api)
         logger.info(f"Broker initialized ({'paper' if self.is_paper else 'REAL'})")
@@ -192,29 +309,27 @@ class RealtimeTradingLoop:
             is_paper=self.is_paper,
             candle_interval=self._candle_interval,
         )
-
-        # Set candle completion callback
         self._ws.set_candle_callback(self._on_candle_complete)
         logger.info(
-            f"WebSocket initialized "
-            f"(candle: {self._candle_interval}min, "
-            f"signal: every {self._signal_interval}min = "
-            f"every {self._candles_per_signal} candles)"
+            f"WebSocket: {self._candle_interval}min candles, "
+            f"signal every {self._signal_interval}min"
         )
 
     def _init_notifier(self) -> None:
-        """Initialize Telegram notifier."""
+        """Initialize Telegram notifier (separate from approval agent)."""
         from src.execution import TelegramNotifier
 
         tg_keys = self.keys.get("telegram", {})
-        bot_token = tg_keys.get("bot_token")
-        chat_id = tg_keys.get("chat_id")
+        bot_token = tg_keys.get("bot_token", "")
+        chat_id = tg_keys.get("chat_id", "")
 
-        if bot_token and chat_id:
+        if bot_token and chat_id and "YOUR" not in bot_token:
             self._notifier = TelegramNotifier(bot_token, chat_id)
             logger.info("Telegram notifier initialized")
-        else:
-            logger.warning("Telegram not configured; notifications disabled")
+
+    # ===================================================================
+    # Main Loop
+    # ===================================================================
 
     def run(self) -> None:
         """Main event loop."""
@@ -224,35 +339,33 @@ class RealtimeTradingLoop:
         self._ws.start()
 
         # Subscribe to universe
-        for ticker in self._universe[:40]:  # KIS limit: ~40 concurrent subs
+        for ticker in self._universe[:40]:
             self._ws.subscribe_price(ticker)
 
-        # Notify startup
         if self._notifier:
             try:
-                self._notifier.send_startup()
+                self._notifier.send_message(
+                    "\U0001f916 <b>Sequential Pipeline Started</b>\n"
+                    f"Model: {PIPELINE['llm_model']}\n"
+                    f"Approval: {'ON' if self.require_approval else 'OFF'}\n"
+                    f"Interval: {self._signal_interval}min"
+                )
             except Exception:
                 pass
 
         logger.info(
-            f"Real-time trading started. "
-            f"Subscribed to {min(len(self._universe), 40)} stocks."
-        )
-        logger.info(
-            f"Market hours: {SCHEDULE['market_open']} - {SCHEDULE['market_close']}"
+            f"Pipeline running. Subscribed to {min(len(self._universe), 40)} stocks."
         )
 
-        # Main loop: check for session boundaries and heartbeat
         try:
             while self._running:
                 now = datetime.now()
-                current_time = now.strftime("%H:%M")
 
-                # Market close -> send daily report
-                if current_time == SCHEDULE["eod_report"]:
+                # EOD report
+                if now.strftime("%H:%M") == SCHEDULE["eod_report"]:
                     self._send_daily_report()
 
-                time.sleep(30)  # Check every 30 seconds
+                time.sleep(30)
 
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
@@ -260,132 +373,221 @@ class RealtimeTradingLoop:
             self.stop()
 
     def _on_candle_complete(self, candle) -> None:
-        """
-        Callback when a 1-minute candle completes.
-
-        Data collection happens every candle (1min).
-        Signal generation happens every signal_interval (e.g. 5min).
-        Re-entry guard prevents LLM inference pileup.
-        """
-        logger.debug(
-            f"Candle ({self._candle_interval}m): {candle.stock_code} "
-            f"O={candle.open} H={candle.high} L={candle.low} C={candle.close} "
-            f"V={candle.volume} ticks={candle.tick_count}"
-        )
-
-        # 항상 가격 데이터는 업데이트 (1분봉 수집)
+        """1-min candle callback — check signal generation timing."""
+        # Always update prices
         all_candles = self._ws.aggregator.get_all_completed()
         self._update_prices_from_candles(all_candles)
 
-        # 시그널 생성 주기 확인
+        # Check signal interval
         self._candle_count += 1
         if self._candle_count % self._candles_per_signal != 0:
-            return  # 아직 시그널 생성 시점 아님
+            return
 
-        # 시간 기반 이중 체크 (동일 시그널 중복 방지)
+        # Duplicate prevention
         now = datetime.now()
         if self._last_signal_time:
             elapsed = (now - self._last_signal_time).total_seconds()
             if elapsed < (self._signal_interval * 60) * 0.8:
                 return
 
-        logger.info(
-            f"Signal trigger: {self._candle_count} candles accumulated, "
-            f"generating signals..."
-        )
-
-        # Re-entry guard: skip if previous cycle is still processing
+        # Re-entry guard
         if self._processing:
-            logger.warning(
-                "Previous signal still processing, skipping this cycle."
-            )
+            logger.warning("Previous pipeline still running, skipping")
             return
         self._processing = True
 
-        # Minimum candle data check
-        if len(all_candles) < 5:
-            logger.debug("Not enough candle data yet, skipping signal generation")
-            self._processing = False
-            return
-
         try:
             self._last_signal_time = now
-
-            # Generate signals
-            signal_result = self._ensemble.generate_signals(
-                date=now,
-                prices=self._prices,
-                features=self._features,
-                regime=None,
-            )
-
-            if signal_result.signals.empty:
-                logger.info("No signals generated")
-                return
-
-            logger.info(
-                f"Signals generated: {len(signal_result.signals)} stocks, "
-                f"weights: {signal_result.strategy_weights}"
-            )
-
-            # Allocate portfolio
-            target_weights = self._allocator.allocate(
-                signal_result.signals, self._prices
-            )
-
-            if target_weights.empty:
-                logger.info("No allocation produced")
-                return
-
-            logger.info(
-                f"Allocation: {len(target_weights)} positions\n"
-                f"{target_weights.to_string()}"
-            )
-
-            # Notify
-            if self._notifier:
-                try:
-                    self._notifier.send_signal_alert(
-                        strategy="LLM Ensemble",
-                        stocks=target_weights["ticker"].tolist(),
-                        regime=signal_result.regime,
-                    )
-                except Exception as e:
-                    logger.error(f"Notification failed: {e}")
-
-            # Execute (unless dry run)
-            if not self.dry_run:
-                self._execute_rebalance(target_weights)
-            else:
-                logger.info("DRY RUN - No orders placed")
-
+            logger.info(f"{'='*40} PIPELINE START {'='*40}")
+            self._run_pipeline(now)
+            logger.info(f"{'='*40} PIPELINE END {'='*40}")
         except Exception as e:
-            logger.error(f"Trading cycle error: {e}", exc_info=True)
+            logger.error(f"Pipeline error: {e}", exc_info=True)
             if self._notifier:
                 try:
-                    self._notifier.send_error(str(e), "candle_trading_cycle")
+                    self._notifier.send_error(str(e), "pipeline_cycle")
                 except Exception:
                     pass
         finally:
             self._processing = False
 
-    def _update_prices_from_candles(
-        self, candles: dict[str, list]
-    ) -> None:
+    # ===================================================================
+    # 7-Step Pipeline
+    # ===================================================================
+
+    def _run_pipeline(self, now: datetime) -> None:
+        """
+        Execute the 7-step sequential pipeline.
+
+        1. Universe Selector
+        2. Feature Extractor (ML scores)
+        3. Data Loader (prices + news)
+        4. Reasoning Engine (LLM)
+        5. Risk Manager
+        6. Approval Agent
+        7. Executor
+        """
+
+        # -- Step 1: Universe Selector --
+        logger.info("[Step 1] Universe: filtering candidates")
+        # Universe is already filtered at init time
+
+        # -- Step 2+3: ContextBuilder (ML scores + prices + news) --
+        logger.info("[Step 2-3] Building context (ML + technical + news)")
+        news_messages = None
+        if self._news_collector is not None:
+            try:
+                news_messages = self._news_collector.get_recent_summary(20)
+            except Exception as e:
+                logger.warning(f"News fetch failed: {e}")
+
+        ctx = self._context_builder.build(
+            date=now,
+            prices=self._prices,
+            features=self._features,
+            news_messages=news_messages,
+            top_k=PIPELINE.get("max_positions", 20) * 3,
+        )
+        logger.info(
+            f"  Context: {ctx.n_stocks} stocks, regime={ctx.regime}, "
+            f"{len(ctx.news_headlines)} news"
+        )
+
+        # -- Step 4: Reasoning Engine (LLM Fund Manager) --
+        logger.info("[Step 4] LLM Fund Manager reasoning")
+        llm_result = self._llm_alpha.generate_from_context(ctx)
+
+        signals = llm_result.get("signals", [])
+        confidence = llm_result.get("confidence")
+        reasoning = llm_result.get("reasoning", "")
+
+        if not signals:
+            logger.info("  LLM returned no signals. Pipeline stops.")
+            return
+
+        logger.info(
+            f"  LLM decision: {len(signals)} signals, " f"confidence={confidence}"
+        )
+        if reasoning:
+            logger.info(f"  Reasoning: {reasoning[:200]}")
+
+        # -- Step 5: Risk Manager --
+        logger.info("[Step 5] Risk Manager: sizing + inverse ETF conversion")
+        current_positions = None
+        try:
+            current_positions = self._order_manager.get_positions()
+        except Exception as e:
+            logger.warning(f"Could not fetch positions: {e}")
+
+        orders = self._risk_manager.process_llm_decisions(
+            llm_signals=signals,
+            current_positions=current_positions,
+        )
+
+        if not orders:
+            logger.info("  No actionable orders after risk check.")
+            return
+
+        buy_count = sum(1 for o in orders if o.side == "BUY")
+        sell_count = sum(1 for o in orders if o.side == "SELL")
+        inv_count = sum(1 for o in orders if o.is_inverse)
+        logger.info(
+            f"  Orders: {buy_count} BUY, {sell_count} SELL, " f"{inv_count} inverse ETF"
+        )
+
+        # -- Step 6: Approval Agent (Human-in-the-Loop) --
+        if self.dry_run:
+            proposal = self._risk_manager.format_proposal(orders)
+            logger.info(f"[Step 6] DRY RUN — proposal:\n{proposal}")
+            if self._notifier:
+                self._notifier.send_message(
+                    f"\U0001f3c3 <b>DRY RUN</b> (no orders)\n\n{proposal}"
+                )
+            return
+
+        if self.require_approval and self._approval_agent:
+            logger.info("[Step 6] Requesting user approval via Telegram")
+
+            total_value = 0
+            try:
+                total_value = self._order_manager.get_cash()
+                positions = self._order_manager.get_positions()
+                if not positions.empty:
+                    total_value += positions["eval_amount"].sum()
+            except Exception:
+                pass
+
+            proposal = self._risk_manager.format_proposal(orders, total_value)
+            approved = self._approval_agent.request_approval(
+                proposal_text=proposal,
+                regime=ctx.regime,
+                confidence=confidence,
+            )
+
+            if not approved:
+                logger.info("  User REJECTED or timeout. Skipping execution.")
+                return
+
+            logger.info("  User APPROVED. Proceeding to execution.")
+        else:
+            logger.info("[Step 6] Auto-execute (no approval required)")
+
+        # -- Step 7: Executor --
+        logger.info("[Step 7] Executing orders via KIS API")
+        target_weights = self._risk_manager.to_target_weights(orders)
+
+        if target_weights.empty:
+            logger.info("  No target weights to execute.")
+            return
+
+        try:
+            executed_orders = self._order_manager.execute_rebalance(
+                target_weights=target_weights,
+                order_type=TRADING.get("order_type", "limit"),
+                sell_first=True,
+                notifier=self._notifier,
+            )
+            logger.info(f"  Executed {len(executed_orders)} orders")
+
+            # Report back
+            if self._approval_agent and self.require_approval:
+                self._approval_agent.send_execution_result(
+                    [
+                        {
+                            "stock_code": o.stock_code,
+                            "side": o.side,
+                            "quantity": o.quantity,
+                        }
+                        for o in executed_orders
+                    ]
+                )
+
+        except Exception as e:
+            logger.error(f"  Execution failed: {e}")
+            if self._notifier:
+                self._notifier.send_error(str(e), "order_execution")
+
+    # ===================================================================
+    # Helpers
+    # ===================================================================
+
+    def _update_prices_from_candles(self, candles: dict[str, list]) -> None:
         """Update price DataFrame with latest candle data."""
         rows = []
         for stock_code, candle_list in candles.items():
             if candle_list:
                 latest = candle_list[-1]
-                rows.append({
-                    "date": pd.Timestamp(latest.start_time.date()),
-                    "ticker": stock_code,
-                    "open": latest.open,
-                    "high": latest.high,
-                    "low": latest.low,
-                    "close": latest.close,
-                    "volume": latest.volume,
-                })
+                rows.append(
+                    {
+                        "date": pd.Timestamp(latest.start_time.date()),
+                        "ticker": stock_code,
+                        "open": latest.open,
+                        "high": latest.high,
+                        "low": latest.low,
+                        "close": latest.close,
+                        "volume": latest.volume,
+                    }
+                )
 
         if rows:
             new_prices = pd.DataFrame(rows)
@@ -394,28 +596,14 @@ class RealtimeTradingLoop:
                     [self._prices, new_prices], ignore_index=True
                 ).drop_duplicates(subset=["date", "ticker"], keep="last")
 
-    def _execute_rebalance(self, target_weights: pd.DataFrame) -> None:
-        """Execute portfolio rebalance via OrderManager."""
-        try:
-            orders = self._order_manager.execute_rebalance(
-                target_weights=target_weights,
-                order_type=TRADING.get("order_type", "limit"),
-                sell_first=True,
-                notifier=self._notifier,
-            )
-            logger.info(f"Rebalance executed: {len(orders)} orders submitted")
-        except Exception as e:
-            logger.error(f"Rebalance execution failed: {e}")
-
     def _send_daily_report(self) -> None:
-        """Send end-of-day report via Telegram."""
+        """Send end-of-day report."""
         if not self._notifier:
             return
-
         try:
             balance = self._order_manager.api.get_balance()
             self._notifier.send_daily_summary(
-                date=datetime.now().strftime("%Y-%m-%d"),
+                date=datetime.now(),
                 total_value=balance.get("total_eval", 0),
                 daily_pnl=balance.get("total_profit_loss", 0),
                 daily_return=0,
@@ -427,56 +615,68 @@ class RealtimeTradingLoop:
 
     def stop(self) -> None:
         """Graceful shutdown."""
-        logger.info("Shutting down...")
+        logger.info("Shutting down pipeline...")
         self._running = False
         if self._ws:
             self._ws.stop()
-        logger.info("Real-time trading stopped")
+        logger.info("Pipeline stopped")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Real-time LLM Trading")
-    parser.add_argument("--paper", action="store_true", default=True,
-                        help="Paper trading (default)")
-    parser.add_argument("--real", action="store_true",
-                        help="Real trading")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Generate signals without placing orders")
-    parser.add_argument("--no-llm", action="store_true",
-                        help="Use traditional ensemble (no LLM)")
+    parser = argparse.ArgumentParser(
+        description="Sequential Pipeline Real-time Trading"
+    )
+    parser.add_argument(
+        "--paper",
+        action="store_true",
+        default=True,
+        help="Paper trading (default)",
+    )
+    parser.add_argument(
+        "--real",
+        action="store_true",
+        help="Real trading",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Generate signals without placing orders",
+    )
+    parser.add_argument(
+        "--no-approval",
+        action="store_true",
+        help="Skip human approval (auto-execute)",
+    )
 
     args = parser.parse_args()
-
     is_paper = not args.real
+    require_approval = not args.no_approval
 
     if not is_paper:
         logger.warning("=" * 60)
-        logger.warning("  REAL TRADING MODE - USE WITH CAUTION!")
+        logger.warning("  REAL TRADING MODE — USE WITH CAUTION!")
         logger.warning("=" * 60)
 
-    # Load keys
     keys = load_keys()
     if keys is None:
         sys.exit(1)
 
-    # Create and run
-    loop = RealtimeTradingLoop(
+    pipeline = SequentialPipeline(
         keys=keys,
         is_paper=is_paper,
         dry_run=args.dry_run,
-        use_llm=not args.no_llm,
+        require_approval=require_approval,
     )
 
-    # Graceful shutdown handler
     def signal_handler(sig, frame):
         logger.info("Shutdown signal received")
-        loop.stop()
+        pipeline.stop()
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    loop.initialize()
-    loop.run()
+    pipeline.initialize()
+    pipeline.run()
 
 
 if __name__ == "__main__":
