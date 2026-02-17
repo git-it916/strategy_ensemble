@@ -19,10 +19,9 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Model name constants
-MODEL_QWEN = "qwen2.5:32b"
-MODEL_DEEPSEEK = "deepseek-r1:32b"
+MODEL_QWEN = "qwen2.5-kospi-ft-s2"
 
-# Task -> model mapping (24GB VRAM: 단일 모델로 통일, 스왑 없음)
+# Task -> model mapping (파인튜닝 7B 모델 사용)
 TASK_MODEL_MAP = {
     "signal_generation": MODEL_QWEN,
     "ensemble_orchestration": MODEL_QWEN,

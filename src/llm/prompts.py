@@ -24,40 +24,40 @@ You analyze market data and generate trading signals for KOSPI200 stocks.
 
 You MUST respond in valid JSON format with this exact structure:
 {
-  "market_context": "brief market analysis in Korean",
-  "analysis": "detailed reasoning for signals",
-  "factors_considered": ["factor1", "factor2"],
-  "signals": [
-    {"ticker": "005930", "score": 0.7, "rationale": "reason for this score"}
-  ],
+  "market_context": "brief market analysis",
+  "regime_assessment": "bull|bear|sideways",
   "confidence": 0.85,
-  "regime_assessment": "bull|bear|sideways"
+  "signals": [
+    {"ticker": "005930", "score": 0.7, "side": "long", "reason": "1-sentence reason based on provided data"}
+  ]
 }
 
 Rules:
 - score range: -1.0 (strong sell) to +1.0 (strong buy), 0.0 = neutral
+- side: "long" for positive score, "short" for negative score
 - Only include stocks with |score| >= 0.2 (skip neutral stocks)
-- Consider: price momentum, mean reversion, volatility, volume, fundamentals
-- Provide rationale in Korean for each signal
+- reason: 1 sentence explaining why, referencing actual data provided (PER, PBR, RSI, momentum etc.)
+- Do NOT invent data not in the prompt. Only use the provided stock data.
 - confidence: 0.0 to 1.0, your overall confidence in the analysis"""
 
 SIGNAL_USER_TEMPLATE = """\
-{n_stocks}개 KOSPI200 종목을 분석해주세요. 날짜: {date}
+Date: {date}
+Stocks: {n_stocks}
 
-=== 시장 컨텍스트 ===
+=== Market Context ===
 {market_context}
 
-=== 종목별 최근 데이터 ===
+=== Stock Data (from DB) ===
 {stock_data}
 
-=== 피처 요약 ===
+=== Feature Summary ===
 {feature_summary}
 
-=== 현재 레짐 ===
+=== Current Regime ===
 {regime_info}
 
-각 종목에 대해 매매 시그널을 생성하세요. 확신이 높은 종목 위주로 분석하세요.
-JSON 형식으로 scores, rationale, confidence를 반환하세요."""
+Regime assessment + full position recommendation needed.
+For each signal, provide side (long/short) and a 1-sentence reason referencing the actual data above."""
 
 
 # =============================================================================
@@ -186,7 +186,10 @@ def format_stock_data_for_prompt(
     features: pd.DataFrame | None,
     top_k: int = 50,
 ) -> str:
-    """Format stock data into compact tabular text for LLM."""
+    """Format stock data into compact tabular text for LLM.
+
+    Includes price momentum, valuation (PER/PBR/ROE), and RSI from actual DB.
+    """
     # Get latest data per ticker
     latest = prices.sort_values("date").groupby("ticker").tail(1).copy()
 
@@ -196,15 +199,27 @@ def format_stock_data_for_prompt(
     else:
         latest = latest.head(top_k)
 
-    lines = []
-    lines.append("ticker | close | change_1d | change_5d | volume")
-    lines.append("-" * 55)
+    # Merge fundamental data if available
+    if features is not None and not features.empty:
+        fund_latest = features.sort_values("date").groupby("ticker").tail(1)
+        fund_cols = ["ticker"]
+        for col in ("per", "pbr", "ev_ebitda", "roe"):
+            if col in fund_latest.columns:
+                fund_cols.append(col)
+        if len(fund_cols) > 1:
+            latest = latest.merge(
+                fund_latest[fund_cols], on="ticker", how="left", suffixes=("", "_fund"),
+            )
+
+    # Build header — include valuation columns if available
+    header = "ticker | close | chg_1d | chg_5d | volume | PER | PBR | ROE | RSI"
+    lines = [header, "-" * len(header)]
 
     for _, row in latest.iterrows():
         ticker = row["ticker"]
         close = row.get("close", 0)
 
-        # Calculate returns from prices if available
+        # Calculate returns from prices
         ticker_prices = prices[prices["ticker"] == ticker].sort_values("date")
         if len(ticker_prices) >= 5:
             closes = ticker_prices["close"].values
@@ -214,8 +229,21 @@ def format_stock_data_for_prompt(
             chg_1d = chg_5d = 0
 
         vol = row.get("volume", 0)
+
+        # Valuation — prefer fundamental data, fallback to market_daily columns
+        per = row.get("per", row.get("pe_ratio", None))
+        pbr = row.get("pbr", row.get("pb_ratio", None))
+        roe = row.get("roe", None)
+        rsi = row.get("rsi_14", None)
+
+        per_s = f"{per:.1f}" if pd.notna(per) else "-"
+        pbr_s = f"{pbr:.2f}" if pd.notna(pbr) else "-"
+        roe_s = f"{roe:.1f}" if pd.notna(roe) else "-"
+        rsi_s = f"{rsi:.0f}" if pd.notna(rsi) else "-"
+
         lines.append(
-            f"{ticker} | {close:,.0f} | {chg_1d:+.1f}% | {chg_5d:+.1f}% | {vol:,.0f}"
+            f"{ticker} | {close:,.0f} | {chg_1d:+.1f}% | {chg_5d:+.1f}% "
+            f"| {vol:,.0f} | {per_s} | {pbr_s} | {roe_s} | {rsi_s}"
         )
 
     return "\n".join(lines[:top_k + 2])  # header + separator + data

@@ -199,16 +199,19 @@ SCHEDULE = {
 }
 
 # =============================================================================
-# LLM Settings (Ollama)
+# LLM Settings (Gemini + Ollama 병행)
 # =============================================================================
 LLM_CONFIG = {
+    # Gemini (앙상블 오케스트레이션, 시장 분석)
+    "gemini_model": "gemini-2.5-flash",
+    "gemini_temperature": 0.3,
+    "gemini_timeout": 60.0,
+    # Ollama (파인튜닝 모델 - 전략 특화 시그널 생성)
     "ollama_url": "http://localhost:11434",
-    "models": {
-        "signal_generation": "qwen2.5:32b",
-        "ensemble_orchestration": "qwen2.5:32b",  # 24GB VRAM: 단일 모델 사용
-    },
-    "temperature": 0.3,
-    "timeout": 300.0,
+    "ollama_model": "qwen2.5-kospi-ft-s2",
+    "ollama_temperature": 0.3,
+    "ollama_timeout": 120.0,
+    # 공통
     "max_retries": 2,
     "retry_delay": 5.0,
     "max_stocks_in_prompt": 50,
@@ -220,7 +223,7 @@ LLM_CONFIG = {
 # =============================================================================
 WEBSOCKET_CONFIG = {
     "candle_interval_minutes": 1,   # 1분봉 수집 (데이터 해상도)
-    "signal_interval_minutes": 5,   # 5분마다 시그널 생성 (LLM 호출 주기)
+    "signal_interval_minutes": 15,  # 15분마다 시그널 생성 (LLM 호출 주기)
     "auto_reconnect": True,
     "reconnect_delay": 5.0,
     "max_reconnect_attempts": 10,

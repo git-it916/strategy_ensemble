@@ -1,0 +1,179 @@
+{
+  "base_model": "qwen2.5-kospi-ft",
+  "base": {
+    "model": "qwen2.5-kospi-ft",
+    "metrics": {
+      "n_samples": 3,
+      "json_valid_rate": 1.0,
+      "schema_valid_rate": 0.0,
+      "avg_n_signals": 0.0,
+      "scores_in_range_rate": 1.0,
+      "korean_rationale_rate": 0.0,
+      "has_confidence_rate": 0.0,
+      "has_regime_rate": 0.0,
+      "has_analysis_rate": 0.0,
+      "avg_latency_ms": 1391.6666666666667,
+      "avg_response_length": 2.0
+    },
+    "details": [
+      {
+        "latency_ms": 3861,
+        "json_valid": true,
+        "schema_valid": false,
+        "n_signals": 0,
+        "scores_in_range": true,
+        "has_korean_rationale": false,
+        "has_confidence": false,
+        "has_regime": false,
+        "has_analysis": false,
+        "response_length": 2,
+        "prompt_id": "bull_market"
+      },
+      {
+        "latency_ms": 156,
+        "json_valid": true,
+        "schema_valid": false,
+        "n_signals": 0,
+        "scores_in_range": true,
+        "has_korean_rationale": false,
+        "has_confidence": false,
+        "has_regime": false,
+        "has_analysis": false,
+        "response_length": 2,
+        "prompt_id": "bear_market"
+      },
+      {
+        "latency_ms": 158,
+        "json_valid": true,
+        "schema_valid": false,
+        "n_signals": 0,
+        "scores_in_range": true,
+        "has_korean_rationale": false,
+        "has_confidence": false,
+        "has_regime": false,
+        "has_analysis": false,
+        "response_length": 2,
+        "prompt_id": "sideways_market"
+      }
+    ]
+  },
+  "finetuned": {
+    "model": "qwen2.5-kospi-ft-s2",
+    "metrics": {
+      "n_samples": 3,
+      "json_valid_rate": 1.0,
+      "schema_valid_rate": 0.0,
+      "avg_n_signals": 0.0,
+      "scores_in_range_rate": 1.0,
+      "korean_rationale_rate": 0.0,
+      "has_confidence_rate": 0.0,
+      "has_regime_rate": 0.0,
+      "has_analysis_rate": 0.0,
+      "avg_latency_ms": 6649.666666666667,
+      "avg_response_length": 440.3333333333333
+    },
+    "details": [
+      {
+        "latency_ms": 1509,
+        "json_valid": true,
+        "schema_valid": false,
+        "n_signals": 0,
+        "scores_in_range": true,
+        "has_korean_rationale": false,
+        "has_confidence": false,
+        "has_regime": false,
+        "has_analysis": false,
+        "response_length": 112,
+        "prompt_id": "bull_market"
+      },
+      {
+        "latency_ms": 4723,
+        "json_valid": true,
+        "schema_valid": false,
+        "n_signals": 0,
+        "scores_in_range": true,
+        "has_korean_rationale": false,
+        "has_confidence": false,
+        "has_regime": false,
+        "has_analysis": false,
+        "response_length": 410,
+        "prompt_id": "bear_market"
+      },
+      {
+        "latency_ms": 13717,
+        "json_valid": true,
+        "schema_valid": false,
+        "n_signals": 0,
+        "scores_in_range": true,
+        "has_korean_rationale": false,
+        "has_confidence": false,
+        "has_regime": false,
+        "has_analysis": false,
+        "response_length": 799,
+        "prompt_id": "sideways_market"
+      }
+    ]
+  },
+  "comparison": {
+    "json_valid_rate": {
+      "base": 1.0,
+      "finetuned": 1.0,
+      "diff": 0.0,
+      "pct_change": 0.0
+    },
+    "schema_valid_rate": {
+      "base": 0.0,
+      "finetuned": 0.0,
+      "diff": 0.0,
+      "pct_change": 0
+    },
+    "avg_n_signals": {
+      "base": 0.0,
+      "finetuned": 0.0,
+      "diff": 0.0,
+      "pct_change": 0
+    },
+    "scores_in_range_rate": {
+      "base": 1.0,
+      "finetuned": 1.0,
+      "diff": 0.0,
+      "pct_change": 0.0
+    },
+    "korean_rationale_rate": {
+      "base": 0.0,
+      "finetuned": 0.0,
+      "diff": 0.0,
+      "pct_change": 0
+    },
+    "has_confidence_rate": {
+      "base": 0.0,
+      "finetuned": 0.0,
+      "diff": 0.0,
+      "pct_change": 0
+    },
+    "has_regime_rate": {
+      "base": 0.0,
+      "finetuned": 0.0,
+      "diff": 0.0,
+      "pct_change": 0
+    },
+    "has_analysis_rate": {
+      "base": 0.0,
+      "finetuned": 0.0,
+      "diff": 0.0,
+      "pct_change": 0
+    },
+    "avg_latency_ms": {
+      "base": 1391.6667,
+      "finetuned": 6649.6667,
+      "diff": 5258.0,
+      "pct_change": 377.82
+    },
+    "avg_response_length": {
+      "base": 2.0,
+      "finetuned": 440.3333,
+      "diff": 438.3333,
+      "pct_change": 21916.67
+    }
+  }
+}

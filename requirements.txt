@@ -27,6 +27,9 @@ torchaudio>=2.0.0
 requests>=2.31.0
 httpx>=0.24.0
 
+# LLM API
+google-genai>=1.0.0
+
 # Scheduling
 schedule>=1.2.0
 apscheduler>=3.10.0

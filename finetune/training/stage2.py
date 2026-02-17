@@ -95,43 +95,43 @@ def train_stage2(
     logger.info("Stage 2 - Step 2: Loading base model + Stage 1 LoRA")
     logger.info("=" * 60)
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="unsloth/Qwen2.5-7B-Instruct",
-        max_seq_length=max_seq_length,
-        dtype=None,
-        load_in_4bit=True,
-    )
-
     if stage1_adapter_dir.exists():
-        from peft import PeftModel
+        # Stage 1 LoRA adapter를 직접 로드 → 이미 LoRA가 붙어있으므로
+        # get_peft_model 호출 없이 바로 이어서 학습
         logger.info(f"Loading Stage 1 LoRA from: {stage1_adapter_dir}")
-        model = PeftModel.from_pretrained(model, str(stage1_adapter_dir))
-        model = model.merge_and_unload()
-        logger.info("Stage 1 LoRA merged into base model")
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=str(stage1_adapter_dir),
+            max_seq_length=max_seq_length,
+            dtype=None,
+            load_in_4bit=True,
+        )
+        # gradient checkpointing만 활성화
+        model.gradient_checkpointing_enable()
+        logger.info("Stage 1 LoRA loaded — continuing training on existing adapter")
     else:
         logger.warning(
             f"Stage 1 adapter not found at {stage1_adapter_dir}. "
-            f"Training from base model."
+            f"Training from base model with fresh LoRA."
         )
-
-    # Step 3: Attach New LoRA for Stage 2
-    logger.info("=" * 60)
-    logger.info(f"Stage 2 - Step 3: Attaching new LoRA (rank={lora_rank})")
-    logger.info("=" * 60)
-
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=lora_rank,
-        target_modules=[
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
-        ],
-        lora_alpha=lora_alpha,
-        lora_dropout=0,
-        bias="none",
-        use_gradient_checkpointing="unsloth",
-        random_state=42,
-    )
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name="unsloth/Qwen2.5-7B-Instruct",
+            max_seq_length=max_seq_length,
+            dtype=None,
+            load_in_4bit=True,
+        )
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=lora_rank,
+            target_modules=[
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",
+            ],
+            lora_alpha=lora_alpha,
+            lora_dropout=0,
+            bias="none",
+            use_gradient_checkpointing="unsloth",
+            random_state=42,
+        )
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
@@ -282,6 +282,8 @@ def main():
     parser.add_argument(
         "--stage1-adapter", type=Path, default=STAGE1_ADAPTER_DIR,
     )
+    parser.add_argument("--skip-stage1", action="store_true",
+                        help="Skip Stage 1 adapter, train from base model directly")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--grad-accum", type=int, default=4)
@@ -292,9 +294,12 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
     args = parser.parse_args()
 
+    # --skip-stage1이면 존재하지 않는 경로를 넘겨서 else 분기로 유도
+    adapter_dir = Path("/nonexistent") if args.skip_stage1 else args.stage1_adapter
+
     train_stage2(
         synthetic_data_path=args.synthetic_data,
-        stage1_adapter_dir=args.stage1_adapter,
+        stage1_adapter_dir=adapter_dir,
         epochs=args.epochs,
         batch_size=args.batch_size,
         grad_accum=args.grad_accum,

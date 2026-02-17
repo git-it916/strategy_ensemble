@@ -52,11 +52,12 @@ class LLMAlpha(BaseAlpha):
         self._client = ollama_client
         self._reasoning_logger = reasoning_logger
 
-        # Configuration
-        self.model = self.config.get("model", MODEL_QWEN)
-        self.temperature = self.config.get("temperature", 0.3)
-        self.max_stocks_in_prompt = self.config.get("max_stocks_in_prompt", 50)
-        self.timeout = self.config.get("timeout", 300.0)
+        # Configuration (파인튜닝 모델 사용)
+        from config.settings import LLM_CONFIG
+        self.model = self.config.get("model", LLM_CONFIG.get("ollama_model", MODEL_QWEN))
+        self.temperature = self.config.get("temperature", LLM_CONFIG.get("ollama_temperature", 0.3))
+        self.max_stocks_in_prompt = self.config.get("max_stocks_in_prompt", LLM_CONFIG.get("max_stocks_in_prompt", 50))
+        self.timeout = self.config.get("timeout", LLM_CONFIG.get("ollama_timeout", 120.0))
 
         # Cache for backtesting
         self._response_cache: dict[str, dict] = {}
@@ -171,13 +172,19 @@ class LLMAlpha(BaseAlpha):
             signals_df = pd.DataFrame(raw_signals)
 
             if signals_df.empty or "ticker" not in signals_df.columns:
-                signals_df = pd.DataFrame(columns=["ticker", "score"])
+                signals_df = pd.DataFrame(columns=["ticker", "score", "side", "reason"])
             else:
                 signals_df["score"] = (
                     pd.to_numeric(signals_df["score"], errors="coerce")
                     .fillna(0)
                     .clip(-1, 1)
                 )
+                if "side" not in signals_df.columns:
+                    signals_df["side"] = signals_df["score"].apply(
+                        lambda x: "long" if x > 0 else "short"
+                    )
+                if "reason" not in signals_df.columns:
+                    signals_df["reason"] = signals_df.get("rationale", "")
 
             # Build metadata
             metadata = {

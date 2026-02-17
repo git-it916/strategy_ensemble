@@ -1,7 +1,7 @@
 """
 LLM Ensemble Orchestrator
 
-Replaces the weighted average signal combination with DeepSeek R1:32B reasoning.
+Replaces the weighted average signal combination with Gemini 2.0 Flash reasoning.
 Maintains full backward compatibility with EnsembleAgent interface.
 """
 
@@ -17,7 +17,7 @@ import pandas as pd
 
 from .agent import EnsembleAgent, EnsembleSignal
 from ..alphas.base_alpha import BaseAlpha
-from ..llm.ollama_client import OllamaClient, MODEL_QWEN
+from ..llm.gemini_client import GeminiClient, MODEL_GEMINI_FLASH
 from ..llm.prompts import (
     ORCHESTRATOR_SYSTEM_PROMPT,
     build_orchestrator_prompt,
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 class LLMEnsembleOrchestrator(EnsembleAgent):
     """
-    LLM-enhanced ensemble agent using DeepSeek R1:32B
+    LLM-enhanced ensemble agent using Gemini 2.0 Flash
     for signal combination instead of weighted average.
 
     Inherits from EnsembleAgent to maintain full compatibility:
@@ -45,32 +45,44 @@ class LLMEnsembleOrchestrator(EnsembleAgent):
         self,
         strategies: list[BaseAlpha],
         config: dict[str, Any] | None = None,
-        ollama_client: OllamaClient | None = None,
+        gemini_client: GeminiClient | None = None,
         reasoning_logger: ReasoningLogger | None = None,
     ):
         super().__init__(strategies, config)
 
-        self._llm_client = ollama_client
+        self._llm_client = gemini_client
         self._reasoning_logger = reasoning_logger
 
         # LLM-specific config
-        self.llm_model = (config or {}).get("llm_model", MODEL_QWEN)
-        self.llm_temperature = (config or {}).get("llm_temperature", 0.2)
+        from config.settings import LLM_CONFIG
+        self.llm_model = (config or {}).get("llm_model", LLM_CONFIG.get("gemini_model", MODEL_GEMINI_FLASH))
+        self.llm_temperature = (config or {}).get("llm_temperature", LLM_CONFIG.get("gemini_temperature", 0.3))
         self.use_llm = (config or {}).get("use_llm_orchestrator", True)
-        self.llm_timeout = (config or {}).get("llm_timeout", 300.0)
+        self.llm_timeout = (config or {}).get("llm_timeout", LLM_CONFIG.get("gemini_timeout", 60.0))
 
         # Store LLM-suggested weights for analysis
         self._llm_suggested_weights: dict[str, float] = {}
 
     @property
-    def llm_client(self) -> OllamaClient:
-        """Lazy init of Ollama client."""
+    def llm_client(self) -> GeminiClient:
+        """Lazy init of Gemini client."""
         if self._llm_client is None:
             from config.settings import LLM_CONFIG
-            self._llm_client = OllamaClient(
-                base_url=LLM_CONFIG.get("ollama_url", "http://localhost:11434"),
+            import yaml
+            from pathlib import Path
+
+            # Load API key from keys.yaml
+            keys_path = Path(__file__).parent.parent.parent / "config" / "keys.yaml"
+            with open(keys_path) as f:
+                keys = yaml.safe_load(f)
+            api_key = keys.get("gemini", {}).get("api_key", "")
+
+            self._llm_client = GeminiClient(
+                api_key=api_key,
                 default_model=self.llm_model,
                 timeout=self.llm_timeout,
+                max_retries=LLM_CONFIG.get("max_retries", 2),
+                retry_delay=LLM_CONFIG.get("retry_delay", 5.0),
             )
         return self._llm_client
 
@@ -87,7 +99,7 @@ class LLMEnsembleOrchestrator(EnsembleAgent):
         date: datetime,
     ) -> pd.DataFrame:
         """
-        Override: Use DeepSeek R1:32B for signal combination.
+        Override: Use Gemini 2.0 Flash for signal combination.
         Falls back to parent's weighted average if LLM is unavailable.
         """
         if not self.use_llm or not all_signals:
@@ -122,7 +134,7 @@ class LLMEnsembleOrchestrator(EnsembleAgent):
                 risk_constraints=risk_constraints,
             )
 
-            # Query DeepSeek R1
+            # Query Gemini
             response = self.llm_client.generate(
                 prompt=prompt,
                 model=self.llm_model,

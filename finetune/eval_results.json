@@ -1,0 +1,60 @@
+{
+  "base_model": "qwen2.5:32b",
+  "base": {
+    "model": "qwen2.5:32b",
+    "metrics": {
+      "n_samples": 3,
+      "json_valid_rate": 0.0,
+      "schema_valid_rate": 0.0,
+      "avg_n_signals": 0.0,
+      "scores_in_range_rate": 1.0,
+      "korean_rationale_rate": 0.0,
+      "has_confidence_rate": 0.0,
+      "has_regime_rate": 0.0,
+      "has_analysis_rate": 0.0,
+      "avg_latency_ms": 10059.0,
+      "avg_response_length": 0.0
+    },
+    "details": [
+      {
+        "latency_ms": 10056,
+        "json_valid": false,
+        "schema_valid": false,
+        "n_signals": 0,
+        "scores_in_range": true,
+        "has_korean_rationale": false,
+        "has_confidence": false,
+        "has_regime": false,
+        "has_analysis": false,
+        "response_length": 0,
+        "prompt_id": "bull_market"
+      },
+      {
+        "latency_ms": 10088,
+        "json_valid": false,
+        "schema_valid": false,
+        "n_signals": 0,
+        "scores_in_range": true,
+        "has_korean_rationale": false,
+        "has_confidence": false,
+        "has_regime": false,
+        "has_analysis": false,
+        "response_length": 0,
+        "prompt_id": "bear_market"
+      },
+      {
+        "latency_ms": 10033,
+        "json_valid": false,
+        "schema_valid": false,
+        "n_signals": 0,
+        "scores_in_range": true,
+        "has_korean_rationale": false,
+        "has_confidence": false,
+        "has_regime": false,
+        "has_analysis": false,
+        "response_length": 0,
+        "prompt_id": "sideways_market"
+      }
+    ]
+  }
+}

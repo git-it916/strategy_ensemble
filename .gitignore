@@ -217,8 +217,8 @@ config/keys.yaml
 *.pem
 *.key
 
-# Data files
-data/
+# Data files (root only, not finetune/data/)
+/data/
 *.parquet
 *.duckdb
 *.duckdb.wal
@@ -247,7 +247,9 @@ llama.cpp/
 # Fine-tuning outputs & model weights
 finetune/output_unsloth/
 finetune/output_stage2/
+finetune/output_stage3/
 finetune/data/synthetic_data.json
+finetune/data/dpo_pairs.json
 unsloth_compiled_cache/
 *.safetensors
 *.gguf
