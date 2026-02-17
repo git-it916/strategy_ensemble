@@ -18,10 +18,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 # Add project root to path
@@ -90,6 +92,274 @@ def _get_strategy_config(name: str) -> dict:
     config.pop("weight", None)
     config.pop("type", None)
     return config
+
+
+def _sample_hpo_params(trial, strategy_name: str) -> dict:
+    """Sample hyperparameters per ML strategy."""
+    if strategy_name == "return_prediction":
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 200, 900, step=100),
+            "max_depth": trial.suggest_int("max_depth", 3, 9),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+            "min_child_weight": trial.suggest_int("min_child_weight", 5, 40, step=5),
+            "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 1.0),
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.1, 5.0),
+        }
+    if strategy_name == "intraday_pattern":
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 150, 800, step=50),
+            "max_depth": trial.suggest_int("max_depth", 3, 10),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+            "min_child_samples": trial.suggest_int("min_child_samples", 10, 80, step=5),
+            "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 1.0),
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.1, 5.0),
+        }
+    if strategy_name == "volatility_forecast":
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 200, 900, step=100),
+            "max_depth": trial.suggest_int("max_depth", 3, 8),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+            "min_child_weight": trial.suggest_int("min_child_weight", 5, 50, step=5),
+            "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 1.0),
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.1, 5.0),
+        }
+    return {}
+
+
+def _build_cv_splits(
+    unique_dates: pd.Index,
+    train_window: int,
+    val_window: int,
+    step: int,
+    mode: str,
+) -> list[tuple[pd.Index, pd.Index]]:
+    """Build rolling/expanding CV splits on unique date index."""
+    if len(unique_dates) < train_window + val_window:
+        return []
+
+    splits: list[tuple[pd.Index, pd.Index]] = []
+    start = train_window
+    while start + val_window <= len(unique_dates):
+        if mode == "expanding":
+            train_dates = unique_dates[:start]
+        else:
+            train_dates = unique_dates[start - train_window:start]
+        val_dates = unique_dates[start:start + val_window]
+        splits.append((train_dates, val_dates))
+        start += step
+    return splits
+
+
+def _score_predictions(y_true: np.ndarray, y_pred: np.ndarray, metric: str) -> float:
+    """Compute CV score (lower is better for all metrics returned here)."""
+    if metric == "ic":
+        corr = pd.Series(y_true).corr(pd.Series(y_pred), method="spearman")
+        corr = 0.0 if pd.isna(corr) else float(corr)
+        return -corr
+    # default: rmse
+    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+
+
+def _evaluate_ml_config_cv(
+    strategy_name: str,
+    strategy_cls,
+    strategy_config: dict,
+    features: pd.DataFrame,
+    labels: pd.DataFrame,
+    cv_splits: list[tuple[pd.Index, pd.Index]],
+    metric: str,
+) -> float:
+    """Evaluate one hyperparameter config using time-series CV."""
+    strategy = strategy_cls(config=strategy_config)
+    feature_cols = strategy.feature_columns
+
+    merged = features.merge(labels[["date", "ticker", "y_reg"]], on=["date", "ticker"], how="inner")
+    missing = set(feature_cols) - set(merged.columns)
+    if missing:
+        raise ValueError(f"{strategy_name}: missing feature columns: {sorted(missing)}")
+
+    frame = merged[["date", "ticker", "y_reg"] + feature_cols].copy()
+    frame["date"] = pd.to_datetime(frame["date"])
+    frame = frame.sort_values("date")
+
+    fold_scores = []
+    for train_dates, val_dates in cv_splits:
+        train_df = frame[frame["date"].isin(train_dates)]
+        val_df = frame[frame["date"].isin(val_dates)]
+        if train_df.empty or val_df.empty:
+            continue
+
+        train_features = train_df[["date", "ticker"] + feature_cols]
+        train_labels = train_df[["date", "ticker", "y_reg"]]
+
+        strategy.fit(
+            prices=pd.DataFrame(),
+            features=train_features,
+            labels=train_labels,
+        )
+
+        y_val = pd.to_numeric(val_df["y_reg"], errors="coerce").values
+        x_val = val_df[feature_cols].values
+        valid_mask = ~np.isnan(y_val)
+        if valid_mask.sum() < 20:
+            continue
+
+        y_val = y_val[valid_mask]
+        x_val = x_val[valid_mask]
+        x_val = np.nan_to_num(x_val, nan=0.0)
+        y_pred = strategy.model.predict(strategy.scaler.transform(x_val))
+
+        fold_scores.append(_score_predictions(y_val, y_pred, metric))
+
+    if not fold_scores:
+        raise ValueError(f"{strategy_name}: no valid CV folds")
+    return float(np.mean(fold_scores))
+
+
+def run_hpo(
+    strategies: list,
+    data: dict,
+    train_end_date: str,
+    hpo_method: str,
+    trials: int,
+    cv_mode: str,
+    train_window: int,
+    val_window: int,
+    step: int,
+    metric: str,
+    strategy_names: list[str] | None = None,
+) -> dict[str, dict]:
+    """Run Optuna HPO for selected ML strategies and inject best params."""
+    if hpo_method == "none":
+        return {}
+
+    if hpo_method != "optuna":
+        raise ValueError(f"Unsupported HPO method: {hpo_method}")
+
+    try:
+        import optuna
+    except ImportError as e:
+        raise RuntimeError(
+            "optuna is required for --hpo optuna. Install with `pip install optuna`."
+        ) from e
+
+    from src.alphas.ml import BaseMLAlpha
+    from src.alphas.ml import (
+        ReturnPredictionAlpha,
+        IntradayPatternAlpha,
+        VolatilityForecastAlpha,
+    )
+
+    cls_map = {
+        "return_prediction": ReturnPredictionAlpha,
+        "intraday_pattern": IntradayPatternAlpha,
+        "volatility_forecast": VolatilityForecastAlpha,
+    }
+    label_map = {
+        "return_prediction": "labels_return",
+        "intraday_pattern": "labels_intraday",
+        "volatility_forecast": "labels_volatility",
+    }
+
+    train_end = pd.Timestamp(train_end_date)
+    features = data.get("features")
+    labels_generic = data.get("labels")
+    if features is None or features.empty:
+        raise ValueError("HPO requires features.parquet (features data is missing)")
+
+    features = features[features["date"] <= train_end].copy()
+    unique_dates = pd.Index(sorted(pd.to_datetime(features["date"]).unique()))
+    cv_splits = _build_cv_splits(
+        unique_dates=unique_dates,
+        train_window=train_window,
+        val_window=val_window,
+        step=step,
+        mode=cv_mode,
+    )
+    if not cv_splits:
+        raise ValueError(
+            f"Not enough data for CV splits: need at least {train_window + val_window} unique dates"
+        )
+
+    # Select target ML strategies
+    targets = [s for s in strategies if isinstance(s, BaseMLAlpha)]
+    if strategy_names:
+        selected = set(strategy_names)
+        targets = [s for s in targets if s.name in selected]
+
+    if not targets:
+        logger.warning("No ML strategies selected for HPO")
+        return {}
+
+    results: dict[str, dict] = {}
+    logger.info(
+        f"HPO start: method={hpo_method}, trials={trials}, cv={cv_mode}, "
+        f"train_window={train_window}, val_window={val_window}, step={step}, metric={metric}"
+    )
+
+    for strategy in targets:
+        name = strategy.name
+        if name not in cls_map:
+            logger.info(f"Skipping HPO for unsupported strategy: {name}")
+            continue
+
+        labels_key = label_map.get(name, "labels_return")
+        labels = data.get(labels_key, labels_generic)
+        if labels is None or labels.empty:
+            logger.warning(f"{name}: labels unavailable ({labels_key}), skipping HPO")
+            continue
+        labels = labels[labels["date"] <= train_end].copy()
+
+        base_config = _get_strategy_config(name)
+        direction = "minimize"
+        logger.info(f"HPO tuning: {name} ({labels_key})")
+
+        def objective(trial):
+            sampled = _sample_hpo_params(trial, name)
+            trial_config = base_config.copy()
+            trial_config.update(sampled)
+            return _evaluate_ml_config_cv(
+                strategy_name=name,
+                strategy_cls=cls_map[name],
+                strategy_config=trial_config,
+                features=features,
+                labels=labels,
+                cv_splits=cv_splits,
+                metric=metric,
+            )
+
+        study = optuna.create_study(direction=direction)
+        study.optimize(objective, n_trials=trials, show_progress_bar=False)
+
+        best_params = study.best_params
+        best_score = float(study.best_value)
+
+        # Inject best params into in-memory strategy object used by train_ensemble()
+        strategy.config.update(best_params)
+        results[name] = {
+            "best_params": best_params,
+            "best_score": best_score,
+            "metric": metric,
+            "n_trials": trials,
+            "cv_mode": cv_mode,
+        }
+        logger.info(f"HPO done: {name}, score={best_score:.6f}, params={best_params}")
+
+    if results:
+        out_dir = MODELS_DIR / "hpo"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"hpo_results_{datetime.now():%Y%m%d_%H%M%S}.json"
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        logger.info(f"HPO results saved: {out_path}")
+
+    return results
 
 
 def initialize_strategies(strategy_names: list[str] | None = None):
@@ -389,6 +659,57 @@ def main():
         action="store_true",
         help="Rebuild features and labels from prices before training",
     )
+    parser.add_argument(
+        "--hpo",
+        type=str,
+        choices=["none", "optuna"],
+        default="none",
+        help="Hyperparameter optimization method",
+    )
+    parser.add_argument(
+        "--hpo-trials",
+        type=int,
+        default=50,
+        help="Number of HPO trials per ML strategy",
+    )
+    parser.add_argument(
+        "--hpo-cv",
+        type=str,
+        choices=["rolling", "expanding"],
+        default="rolling",
+        help="CV mode for HPO",
+    )
+    parser.add_argument(
+        "--hpo-train-window",
+        type=int,
+        default=252,
+        help="Training window length (unique dates) for HPO CV",
+    )
+    parser.add_argument(
+        "--hpo-val-window",
+        type=int,
+        default=63,
+        help="Validation window length (unique dates) for HPO CV",
+    )
+    parser.add_argument(
+        "--hpo-step",
+        type=int,
+        default=21,
+        help="Step size (unique dates) between HPO CV folds",
+    )
+    parser.add_argument(
+        "--hpo-metric",
+        type=str,
+        choices=["rmse", "ic"],
+        default="rmse",
+        help="Objective metric for HPO",
+    )
+    parser.add_argument(
+        "--hpo-strategies",
+        type=str,
+        default="return_prediction,intraday_pattern,volatility_forecast",
+        help="Comma-separated ML strategies to tune in HPO",
+    )
 
     args = parser.parse_args()
 
@@ -418,6 +739,26 @@ def main():
     if not strategies:
         logger.error("No strategies initialized")
         sys.exit(1)
+
+    # Optional HPO before training
+    if args.hpo != "none":
+        hpo_targets = (
+            [s.strip() for s in args.hpo_strategies.split(",") if s.strip()]
+            if args.hpo_strategies else None
+        )
+        run_hpo(
+            strategies=strategies,
+            data=data,
+            train_end_date=args.train_end,
+            hpo_method=args.hpo,
+            trials=args.hpo_trials,
+            cv_mode=args.hpo_cv,
+            train_window=args.hpo_train_window,
+            val_window=args.hpo_val_window,
+            step=args.hpo_step,
+            metric=args.hpo_metric,
+            strategy_names=hpo_targets,
+        )
 
     # Train ensemble
     result = train_ensemble(

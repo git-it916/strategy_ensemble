@@ -97,10 +97,17 @@ class ContextBuilder:
         regime_classifier: Any | None = None,
         news_collector: Any | None = None,
     ):
+        from config.settings import PIPELINE
+
         self.ml_strategies = ml_strategies or {}
         self.technical_strategies = technical_strategies or {}
         self.regime_classifier = regime_classifier
         self.news_collector = news_collector
+        self.ml_score_weights = PIPELINE.get("ml_score_weights", {})
+        self.ml_score_normalization = str(
+            PIPELINE.get("ml_score_normalization", "tanh")
+        ).lower()
+        self.ml_score_temperature = float(PIPELINE.get("ml_score_temperature", 1.0))
 
     def build(
         self,
@@ -280,15 +287,14 @@ class ContextBuilder:
         top_k: int = 50,
     ) -> list[StockContext]:
         """모든 데이터를 종목별로 통합."""
+        ml_score_map = self._build_ml_score_map(ml_signals)
+
         # 최신 가격 데이터
         prices_filtered = prices[prices["date"] <= pd.Timestamp(date)]
         latest = prices_filtered.sort_values("date").groupby("ticker").tail(1).copy()
 
         # 거래량 기준 상위 종목 (ML 스코어가 있는 종목 우선)
-        ml_tickers = set()
-        for df in ml_signals.values():
-            if "ticker" in df.columns:
-                ml_tickers.update(df["ticker"].tolist())
+        ml_tickers = set(ml_score_map.keys())
 
         # ML 신호가 있는 종목 + 거래량 상위 종목
         if "volume" in latest.columns:
@@ -296,7 +302,19 @@ class ContextBuilder:
         else:
             vol_top = set(latest["ticker"].tolist()[:top_k * 2])
 
-        candidate_tickers = list(ml_tickers | vol_top)[:top_k]
+        # ML 강도 순으로 우선 선별 후 거래량 상위 종목으로 채움
+        ml_ranked = sorted(
+            ml_tickers,
+            key=lambda t: abs(self._aggregate_ml_score(ml_score_map.get(t, {}))),
+            reverse=True,
+        )
+        candidate_tickers = ml_ranked[:top_k]
+        if len(candidate_tickers) < top_k:
+            for ticker in latest.nlargest(top_k * 3, "volume")["ticker"].tolist():
+                if ticker in vol_top and ticker not in candidate_tickers:
+                    candidate_tickers.append(ticker)
+                if len(candidate_tickers) >= top_k:
+                    break
 
         # 펀더멘털 merge
         fund_data = {}
@@ -325,14 +343,9 @@ class ContextBuilder:
             chg_1d = (closes[-1] / closes[-2] - 1) if len(closes) >= 2 else 0
             chg_5d = (closes[-1] / closes[-5] - 1) if len(closes) >= 5 else 0
 
-            # ML 스코어 수집
-            ml_scores = {}
-            for strat_name, sig_df in ml_signals.items():
-                match = sig_df[sig_df["ticker"] == ticker]
-                if not match.empty:
-                    ml_scores[strat_name] = float(match.iloc[0]["score"])
-
-            ml_avg = np.mean(list(ml_scores.values())) if ml_scores else 0.0
+            # ML 스코어 수집 + 가중 집계
+            ml_scores = ml_score_map.get(ticker, {})
+            ml_avg = self._aggregate_ml_score(ml_scores)
 
             # 기술적 지표 (가격 데이터에서)
             rsi_14 = last_row.get("rsi_14")
@@ -368,6 +381,54 @@ class ContextBuilder:
         stocks.sort(key=lambda s: abs(s.ml_avg_score), reverse=True)
 
         return stocks[:top_k]
+
+    def _build_ml_score_map(
+        self, ml_signals: dict[str, pd.DataFrame]
+    ) -> dict[str, dict[str, float]]:
+        """전략별 시그널 DataFrame을 ticker -> {strategy: score} 맵으로 변환."""
+        score_map: dict[str, dict[str, float]] = {}
+        for strat_name, sig_df in ml_signals.items():
+            if "ticker" not in sig_df.columns or "score" not in sig_df.columns:
+                continue
+            for _, row in sig_df.iterrows():
+                ticker = row.get("ticker")
+                if not ticker:
+                    continue
+                score_map.setdefault(str(ticker), {})[strat_name] = float(
+                    row.get("score", 0.0)
+                )
+        return score_map
+
+    def _normalize_ml_score(self, score: float) -> float:
+        """모델별 점수 스케일 차이를 완화해 [-1, 1] 범위로 정규화."""
+        method = self.ml_score_normalization
+        if method == "none":
+            return float(score)
+        if method == "clip":
+            return float(np.clip(score, -1.0, 1.0))
+
+        # default: tanh
+        temp = max(self.ml_score_temperature, 1e-6)
+        return float(np.tanh(score / temp))
+
+    def _aggregate_ml_score(self, ml_scores: dict[str, float]) -> float:
+        """전략별 가중치 + 정규화 기반 ML 통합 점수 계산."""
+        if not ml_scores:
+            return 0.0
+
+        weighted_sum = 0.0
+        weight_sum = 0.0
+        for name, raw_score in ml_scores.items():
+            w = float(self.ml_score_weights.get(name, 1.0))
+            if w <= 0:
+                continue
+            norm_score = self._normalize_ml_score(float(raw_score))
+            weighted_sum += w * norm_score
+            weight_sum += w
+
+        if weight_sum <= 0:
+            return 0.0
+        return float(weighted_sum / weight_sum)
 
     def _build_market_summary(
         self, prices: pd.DataFrame, regime: str | None

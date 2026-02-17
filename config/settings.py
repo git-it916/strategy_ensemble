@@ -252,6 +252,16 @@ PIPELINE = {
         "volatility_forecast",
         "intraday_pattern",
     ],
+    # ML score aggregation tuning (Step 2 핵심 편집 포인트)
+    # - 가중합: 전략별 상대 중요도 조절
+    # - tanh 정규화: 모델별 스코어 스케일 차이 완화
+    "ml_score_weights": {
+        "return_prediction": 0.50,
+        "intraday_pattern": 0.30,
+        "volatility_forecast": 0.20,
+    },
+    "ml_score_normalization": "tanh",  # tanh | clip | none
+    "ml_score_temperature": 1.0,
     # Step 3: Technical + fundamental 소스
     "technical_strategies": [
         "rsi_reversal",
