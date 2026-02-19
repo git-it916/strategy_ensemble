@@ -10,14 +10,24 @@ All ML alphas inherit from BaseMLAlpha, which provides:
 
 from .base_ml_alpha import BaseMLAlpha
 from .return_prediction import ReturnPredictionAlpha
-from .intraday_pattern import IntradayPatternAlpha
 from .volatility_forecast import VolatilityForecastAlpha
 from .regime_classifier import RegimeClassifier
+
+try:
+    from .intraday_pattern import IntradayPatternAlpha
+except ModuleNotFoundError as e:
+    # Keep the ML package importable even when optional deps (e.g. lightgbm)
+    # are not installed. IntradayPatternAlpha remains unavailable.
+    if e.name != "lightgbm":
+        raise
+    IntradayPatternAlpha = None  # type: ignore[assignment]
 
 __all__ = [
     "BaseMLAlpha",
     "ReturnPredictionAlpha",
-    "IntradayPatternAlpha",
     "VolatilityForecastAlpha",
     "RegimeClassifier",
 ]
+
+if IntradayPatternAlpha is not None:
+    __all__.append("IntradayPatternAlpha")

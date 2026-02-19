@@ -28,13 +28,14 @@ from config.settings import (
     DATA_DIR,
     PROCESSED_DATA_DIR,
     DUCKDB_PATH,
+    UNIVERSE,
 )
 from config.logging_config import setup_logging
 
 logger = setup_logging("data_update")
 
 
-# KOSPI200 주요 종목 (100개)
+# Fallback seed universe (dynamic universe build 실패 시 사용)
 KOSPI200_TICKERS = [
     "005930",  # 삼성전자
     "000660",  # SK하이닉스
@@ -163,7 +164,7 @@ def update_from_kis(
         keys: API keys
         start_date: YYYY-MM-DD
         end_date: YYYY-MM-DD
-        tickers: 종목코드 리스트 (None이면 KOSPI200 기본)
+        tickers: 종목코드 리스트 (None이면 기본 유니버스 사용)
 
     Returns:
         업데이트 결과
@@ -180,7 +181,7 @@ def update_from_kis(
     api = KISApi(auth)
 
     if tickers is None:
-        tickers = KOSPI200_TICKERS
+        tickers = build_default_ticker_universe(100)
 
     # 날짜 형식 변환 (YYYY-MM-DD → YYYYMMDD)
     start_fmt = start_date.replace("-", "")
@@ -260,6 +261,47 @@ def update_from_kis(
         "n_tickers": df["ticker"].nunique(),
         "date_range": f"{df['date'].min().date()} ~ {df['date'].max().date()}",
     }
+
+
+def build_default_ticker_universe(n_stocks: int) -> list[str]:
+    """
+    Build update universe from latest processed prices.
+
+    Priority:
+        1) KOSPI + KOSDAQ, 시총 1000억 이상(설정값), 거래대금 기준 상위
+        2) 실패 시 fallback seed(KOSPI200_TICKERS)
+    """
+    from src.pipeline import build_universe_snapshot
+
+    prices_path = PROCESSED_DATA_DIR / "prices.parquet"
+    fallback = KOSPI200_TICKERS[:n_stocks]
+
+    if not prices_path.exists():
+        logger.warning("prices.parquet not found, fallback seed universe will be used")
+        return fallback
+
+    try:
+        prices = pd.read_parquet(prices_path)
+        prices["date"] = pd.to_datetime(prices["date"])
+        universe_df = build_universe_snapshot(
+            prices=prices,
+            min_market_cap=UNIVERSE.get("min_market_cap", 0),
+            min_turnover=UNIVERSE.get("min_volume", 0),
+            max_stocks=n_stocks,
+            allowed_markets=("KOSPI", "KOSDAQ"),
+        )
+        tickers = universe_df["ticker_order"].astype(str).tolist()
+        if tickers:
+            logger.info(
+                f"Using dynamic universe: {len(tickers)} tickers "
+                "(KOSPI/KOSDAQ + min market cap filter)"
+            )
+            return tickers
+    except Exception as e:
+        logger.warning(f"Dynamic universe build failed, fallback will be used: {e}")
+
+    logger.warning("Fallback seed universe (KOSPI200_TICKERS) is being used")
+    return fallback
 
 
 def build_features_and_labels() -> None:
@@ -376,8 +418,8 @@ def main():
     if keys is None:
         sys.exit(1)
 
-    # 데이터 업데이트
-    tickers = KOSPI200_TICKERS[:args.n_stocks]
+    # 데이터 업데이트 (동적 유니버스 기본)
+    tickers = build_default_ticker_universe(args.n_stocks)
     result = update_from_kis(keys, start_date, end_date, tickers)
     logger.info(f"Update result: {result}")
 

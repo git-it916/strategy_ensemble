@@ -13,12 +13,15 @@ from abc import abstractmethod
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import logging
 
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from ..base_alpha import BaseAlpha, AlphaResult
+
+logger = logging.getLogger(__name__)
 
 
 class BaseMLAlpha(BaseAlpha):
@@ -49,6 +52,8 @@ class BaseMLAlpha(BaseAlpha):
         self.model = None
         self.scaler: StandardScaler | None = None
         self.feature_columns = feature_columns
+        # May become a subset of feature_columns if allow_feature_subset is enabled.
+        self.active_feature_columns = list(feature_columns)
 
     @abstractmethod
     def _build_model(self) -> Any:
@@ -91,9 +96,28 @@ class BaseMLAlpha(BaseAlpha):
         # Check required columns exist
         missing = set(self.feature_columns) - set(merged.columns)
         if missing:
-            raise ValueError(f"{self.name}: Missing feature columns: {missing}")
+            allow_subset = bool(self.config.get("allow_feature_subset", False))
+            if allow_subset:
+                available = [c for c in self.feature_columns if c in merged.columns]
+                if not available:
+                    raise ValueError(
+                        f"{self.name}: Missing feature columns: {missing} "
+                        "(no usable fallback features)"
+                    )
+                self.active_feature_columns = available
+                logger.warning(
+                    "%s: Using feature subset (%d/%d). Missing=%s",
+                    self.name,
+                    len(self.active_feature_columns),
+                    len(self.feature_columns),
+                    sorted(missing),
+                )
+            else:
+                raise ValueError(f"{self.name}: Missing feature columns: {missing}")
+        else:
+            self.active_feature_columns = list(self.feature_columns)
 
-        X = merged[self.feature_columns].values
+        X = merged[self.active_feature_columns].values
         y = merged["y_reg"].values
 
         # Drop rows with NaN
@@ -114,7 +138,8 @@ class BaseMLAlpha(BaseAlpha):
         return {
             "status": "fitted",
             "n_samples": len(X),
-            "features": self.feature_columns,
+            "features": self.active_feature_columns,
+            "missing_features": sorted(missing) if missing else [],
         }
 
     def generate_signals(
@@ -148,7 +173,8 @@ class BaseMLAlpha(BaseAlpha):
         latest = feat.sort_values("date").groupby("ticker").last().reset_index()
 
         # Check columns
-        missing = set(self.feature_columns) - set(latest.columns)
+        feature_cols = getattr(self, "active_feature_columns", self.feature_columns)
+        missing = set(feature_cols) - set(latest.columns)
         if missing:
             return AlphaResult(
                 date=date,
@@ -156,7 +182,7 @@ class BaseMLAlpha(BaseAlpha):
                 metadata={"strategy": self.name, "error": f"missing columns: {missing}"},
             )
 
-        X = latest[self.feature_columns].values
+        X = latest[feature_cols].values
 
         # Handle NaN: fill with 0 for prediction (scaler expects no NaN)
         nan_mask = np.isnan(X)
@@ -174,7 +200,7 @@ class BaseMLAlpha(BaseAlpha):
         return AlphaResult(
             date=date,
             signals=signals,
-            metadata={"strategy": self.name},
+            metadata={"strategy": self.name, "features_used": feature_cols},
         )
 
     # ------------------------------------------------------------------
@@ -187,6 +213,7 @@ class BaseMLAlpha(BaseAlpha):
             "model": self.model,
             "scaler": self.scaler,
             "feature_columns": self.feature_columns,
+            "active_feature_columns": self.active_feature_columns,
         }
 
     def _restore_extra_state(self, state: dict[str, Any]) -> None:
@@ -194,6 +221,9 @@ class BaseMLAlpha(BaseAlpha):
         self.model = state.get("model")
         self.scaler = state.get("scaler")
         self.feature_columns = state.get("feature_columns", [])
+        self.active_feature_columns = state.get(
+            "active_feature_columns", self.feature_columns
+        )
 
     def save_state(self, path: Path) -> dict[str, Any]:
         """
@@ -205,6 +235,7 @@ class BaseMLAlpha(BaseAlpha):
         meta = super().save_state(path)
         meta["type"] = "ml"
         meta["features"] = self.feature_columns
+        meta["active_features"] = self.active_feature_columns
         if hasattr(self.model, "get_params"):
             meta["model_params"] = self.model.get_params()
         return meta

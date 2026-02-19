@@ -17,19 +17,56 @@ from telethon import TelegramClient, events
 logger = logging.getLogger(__name__)
 
 
-def parse_channels(channels_str: str) -> list:
-    """쉼표로 구분된 채널 문자열을 리스트로 변환."""
+def parse_channels(channels_str: str | list[str | int]) -> list[str | int]:
+    """쉼표 문자열/리스트 입력을 Telethon 채널 식별자로 정규화."""
     if not channels_str:
         return []
-    channels = []
-    for ch in channels_str.split(","):
-        ch = ch.strip()
+
+    if isinstance(channels_str, list):
+        raw_items = [str(x) for x in channels_str]
+    else:
+        raw_items = channels_str.split(",")
+
+    channels: list[str | int] = []
+    seen: set[str | int] = set()
+
+    for raw in raw_items:
+        ch = raw.strip()
         if not ch:
             continue
+
+        # Numeric channel/chat id
         if ch.lstrip("-").isdigit():
-            channels.append(int(ch))
+            value: str | int = int(ch)
         else:
-            channels.append(ch)
+            # Accept forms:
+            #   https://t.me/foo
+            #   http://t.me/foo
+            #   t.me/foo
+            #   @foo
+            #   foo
+            ch = ch.replace("https://", "").replace("http://", "")
+            if ch.startswith("t.me/"):
+                ch = ch[5:]
+            ch = ch.strip("/")
+            if ch.startswith("@"):
+                ch = ch[1:]
+
+            # t.me/c/<internal_id>/<msg_id> format (private channel links)
+            if ch.startswith("c/"):
+                parts = ch.split("/")
+                if len(parts) >= 2 and parts[1].isdigit():
+                    value = int(f"-100{parts[1]}")
+                else:
+                    continue
+            else:
+                value = ch
+
+        if value in seen:
+            continue
+        seen.add(value)
+        channels.append(value)
+
     return channels
 
 

@@ -47,6 +47,8 @@ class ReturnPredictionAlpha(BaseMLAlpha):
     ):
         config = config or {}
         features = feature_columns or config.pop("features", None) or RETURN_FEATURES
+        # Intraday features are optional in many environments.
+        config.setdefault("allow_feature_subset", True)
 
         super().__init__(name=name, feature_columns=features, config=config)
 

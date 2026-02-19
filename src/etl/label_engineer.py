@@ -48,7 +48,11 @@ class LabelEngineer:
         df = prices[["date", "ticker", "close"]].copy()
         df = df.sort_values(["ticker", "date"])
 
-        df["y_reg"] = df.groupby("ticker")["close"].pct_change(horizon).shift(-horizon)
+        df["y_reg"] = (
+            df.groupby("ticker")["close"]
+            .pct_change(horizon, fill_method=None)
+            .shift(-horizon)
+        )
 
         result = df[["date", "ticker", "y_reg"]].dropna(subset=["y_reg"])
         logger.info(
@@ -79,7 +83,7 @@ class LabelEngineer:
         df = prices[["date", "ticker", "close"]].copy()
         df = df.sort_values(["ticker", "date"])
 
-        df["_ret"] = df.groupby("ticker")["close"].pct_change()
+        df["_ret"] = df.groupby("ticker")["close"].pct_change(fill_method=None)
 
         # Forward rolling std of returns, then annualize
         df["y_reg"] = (
@@ -189,7 +193,9 @@ class LabelEngineer:
             df.drop(columns=["_next_open"], inplace=True)
 
         elif label_type == "next_close_ret":
-            df["y_reg"] = df.groupby("ticker")["close"].pct_change().shift(-1)
+            df["y_reg"] = (
+                df.groupby("ticker")["close"].pct_change(fill_method=None).shift(-1)
+            )
 
         else:
             raise ValueError(f"Unknown label_type: {label_type}")

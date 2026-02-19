@@ -1,7 +1,7 @@
 """
 Gemini LLM Client
 
-Wrapper for Google Gemini API (gemini-2.5-flash) using google.genai SDK.
+Wrapper for Google Gemini API (gemini-3-flash) using google.genai SDK.
 Implements the same interface as OllamaClient for drop-in replacement.
 """
 
@@ -19,7 +19,7 @@ from .ollama_client import _extract_json
 logger = logging.getLogger(__name__)
 
 # Model constants
-MODEL_GEMINI_FLASH = "gemini-2.5-flash"
+MODEL_GEMINI_FLASH = "gemini-3-flash"
 MODEL_GEMINI_FLASH_LITE = "gemini-2.5-flash-lite"
 
 # Task -> model mapping

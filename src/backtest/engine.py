@@ -114,17 +114,29 @@ class BacktestEngine:
         """
         Run backtest over historical period.
 
-        Per rebalance date:
-        1. Generate ensemble signals
-        2. Allocate portfolio
-        3. Calculate trades vs current positions
-        4. Apply transaction costs and slippage
-        5. Update portfolio value
+        Timing assumption:
+        - Signals are generated on rebalance date close (t)
+        - Orders are executed at close (t)
+        - New weights become active from next trading day open (t+1)
+        - Period return is measured open-to-open between activation dates
         """
         rebalance_dates = self._get_rebalance_dates(prices, start_date, end_date)
+        if len(rebalance_dates) < 2:
+            logger.warning("Backtest skipped: need at least 2 rebalance dates")
+            empty = pd.Series(dtype=float)
+            return BacktestResult(
+                returns=empty.rename("returns"),
+                portfolio_values=empty.rename("portfolio_value"),
+                holdings_history=[],
+                transaction_costs=empty.rename("costs"),
+                signals_history=[],
+            )
+
+        all_trading_dates = prices["date"].sort_values().unique()
         logger.info(
             f"Backtest: {start_date} to {end_date}, "
-            f"{len(rebalance_dates)} rebalance periods"
+            f"{len(rebalance_dates) - 1} evaluated periods "
+            "(close execution, next-open activation)"
         )
 
         # State
@@ -137,41 +149,70 @@ class BacktestEngine:
         signals_history: list[dict] = []
         daily_costs: list[float] = []
 
-        for i, date in enumerate(rebalance_dates):
+        for i in range(len(rebalance_dates) - 1):
+            signal_date = rebalance_dates[i]
+            next_signal_date = rebalance_dates[i + 1]
+            activation_date = self._next_trading_date(all_trading_dates, signal_date)
+            next_activation_date = self._next_trading_date(
+                all_trading_dates, next_signal_date
+            )
+
+            if activation_date is None:
+                logger.warning(
+                    "Skipping period with invalid activation window: "
+                    f"signal={signal_date}, next_signal={next_signal_date}, "
+                    f"activation={activation_date}, next_activation={next_activation_date}"
+                )
+                continue
+            if next_activation_date is None:
+                # Natural end-of-sample boundary: nothing to evaluate beyond this point.
+                break
+            if activation_date >= next_activation_date:
+                logger.warning(
+                    "Skipping period with non-increasing activation window: "
+                    f"signal={signal_date}, next_signal={next_signal_date}, "
+                    f"activation={activation_date}, next_activation={next_activation_date}"
+                )
+                continue
+
             try:
+                prices_until_signal = prices[prices["date"] <= signal_date]
+                features_until_signal = features
+                if features is not None and "date" in features.columns:
+                    features_until_signal = features[
+                        features["date"] <= pd.Timestamp(signal_date)
+                    ]
+
                 # Get regime if classifier available
                 regime = None
                 if regime_classifier is not None:
                     try:
-                        regime = regime_classifier.predict_regime(date, prices, features)
+                        regime = regime_classifier.predict_regime(
+                            signal_date, prices_until_signal, features_until_signal
+                        )
                     except Exception:
                         pass
 
                 # Generate signals
-                signal = ensemble.generate_signals(date, prices, features, regime)
+                signal = ensemble.generate_signals(
+                    signal_date,
+                    prices_until_signal,
+                    features_until_signal,
+                    regime,
+                )
                 signals_df = signal.signals
 
+                # Build target portfolio. Empty signals -> move to cash.
                 if signals_df.empty:
-                    # No signals: hold cash, 0 return
-                    daily_returns.append(0.0)
-                    daily_values.append(portfolio_value)
-                    daily_dates.append(date)
-                    daily_costs.append(0.0)
-                    continue
-
-                # Allocate
-                target_weights = allocator.allocate(signals_df, prices)
-
-                if target_weights.empty:
-                    daily_returns.append(0.0)
-                    daily_values.append(portfolio_value)
-                    daily_dates.append(date)
-                    daily_costs.append(0.0)
-                    continue
-
-                new_weights = dict(
-                    zip(target_weights["ticker"], target_weights["weight"])
-                )
+                    new_weights: dict[str, float] = {}
+                else:
+                    target_weights = allocator.allocate(signals_df, prices_until_signal)
+                    if target_weights.empty:
+                        new_weights = {}
+                    else:
+                        new_weights = dict(
+                            zip(target_weights["ticker"], target_weights["weight"])
+                        )
 
                 # Transaction costs
                 cost = self._apply_transaction_costs(
@@ -180,49 +221,53 @@ class BacktestEngine:
                 portfolio_value -= cost
                 daily_costs.append(cost)
 
-                # Calculate return until next rebalance
-                if i + 1 < len(rebalance_dates):
-                    next_date = rebalance_dates[i + 1]
-                else:
-                    next_date = pd.Timestamp(end_date)
-
+                # Orders filled on signal_date close, weights active from next open.
                 period_return = self._calculate_period_return(
-                    new_weights, prices, date, next_date
+                    new_weights,
+                    prices,
+                    activation_date,
+                    next_activation_date,
+                    from_price_col="open",
+                    to_price_col="open",
                 )
 
                 portfolio_value *= (1 + period_return)
                 daily_returns.append(period_return)
                 daily_values.append(portfolio_value)
-                daily_dates.append(date)
+                daily_dates.append(activation_date)
 
                 # Record
                 current_weights = new_weights
                 holdings_history.append({
-                    "date": date,
+                    "date": signal_date,
+                    "activation_date": activation_date,
                     "weights": new_weights.copy(),
                     "portfolio_value": portfolio_value,
                     "n_positions": len(new_weights),
                 })
                 signals_history.append({
-                    "date": date,
+                    "date": signal_date,
+                    "activation_date": activation_date,
                     "n_signals": len(signals_df),
-                    "top_signals": signals_df.nlargest(5, "score")[
-                        ["ticker", "score"]
-                    ].to_dict("records"),
+                    "top_signals": (
+                        signals_df.nlargest(5, "score")[["ticker", "score"]]
+                        .to_dict("records")
+                        if not signals_df.empty else []
+                    ),
                 })
 
                 if (i + 1) % 50 == 0:
                     logger.info(
-                        f"  [{i + 1}/{len(rebalance_dates)}] "
+                        f"  [{i + 1}/{len(rebalance_dates) - 1}] "
                         f"PV={portfolio_value:,.0f} "
                         f"Return={period_return:+.4f}"
                     )
 
             except Exception as e:
-                logger.error(f"Backtest error at {date}: {e}")
+                logger.error(f"Backtest error at {signal_date}: {e}")
                 daily_returns.append(0.0)
                 daily_values.append(portfolio_value)
-                daily_dates.append(date)
+                daily_dates.append(activation_date)
                 daily_costs.append(0.0)
 
         # Build result
@@ -306,18 +351,32 @@ class BacktestEngine:
         if self.rebalance_frequency == "daily":
             return list(trading_dates)
         elif self.rebalance_frequency == "weekly":
-            # First trading day of each week
-            dates_series = pd.Series(trading_dates)
-            weekly = dates_series.groupby(
-                dates_series.dt.isocalendar().week
-            ).first()
+            # First trading day of each (ISO year, ISO week)
+            dates_series = pd.Series(trading_dates).sort_values()
+            iso = dates_series.dt.isocalendar()
+            weekly = dates_series.groupby([iso.year, iso.week]).first()
             return list(weekly)
         elif self.rebalance_frequency == "monthly":
-            dates_series = pd.Series(trading_dates)
-            monthly = dates_series.groupby(dates_series.dt.month).first()
+            dates_series = pd.Series(trading_dates).sort_values()
+            monthly = dates_series.groupby(
+                [dates_series.dt.year, dates_series.dt.month]
+            ).first()
             return list(monthly)
         else:
             return list(trading_dates)
+
+    @staticmethod
+    def _next_trading_date(
+        all_trading_dates: np.ndarray,
+        date: datetime,
+    ) -> datetime | None:
+        """Return the first trading date strictly after `date`."""
+        if len(all_trading_dates) == 0:
+            return None
+        idx = all_trading_dates.searchsorted(np.datetime64(pd.Timestamp(date)), side="right")
+        if idx >= len(all_trading_dates):
+            return None
+        return pd.Timestamp(all_trading_dates[idx])
 
     def _calculate_period_return(
         self,
@@ -325,6 +384,8 @@ class BacktestEngine:
         prices: pd.DataFrame,
         date_from: datetime,
         date_to: datetime,
+        from_price_col: str = "close",
+        to_price_col: str = "close",
     ) -> float:
         """Calculate portfolio return between two dates."""
         if not holdings:
@@ -337,11 +398,18 @@ class BacktestEngine:
         if from_prices.empty or to_prices.empty:
             return 0.0
 
-        from_map = dict(zip(from_prices["ticker"], from_prices["close"]))
-        to_map = dict(zip(to_prices["ticker"], to_prices["close"]))
+        src_col = from_price_col if from_price_col in from_prices.columns else "close"
+        dst_col = to_price_col if to_price_col in to_prices.columns else "close"
+        if src_col != from_price_col or dst_col != to_price_col:
+            logger.warning(
+                "Price column fallback in period return: "
+                f"from={from_price_col}->{src_col}, to={to_price_col}->{dst_col}"
+            )
+
+        from_map = dict(zip(from_prices["ticker"], from_prices[src_col]))
+        to_map = dict(zip(to_prices["ticker"], to_prices[dst_col]))
 
         portfolio_return = 0.0
-        total_weight = 0.0
 
         for ticker, weight in holdings.items():
             if ticker in from_map and ticker in to_map:
@@ -350,7 +418,6 @@ class BacktestEngine:
                 if p0 > 0:
                     stock_return = (p1 / p0) - 1
                     portfolio_return += weight * stock_return
-                    total_weight += weight
 
         # Cash portion earns nothing
         return portfolio_return

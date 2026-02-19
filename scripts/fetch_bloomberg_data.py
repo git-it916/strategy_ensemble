@@ -10,19 +10,156 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
-import blpapi
+try:
+    import blpapi
+except ImportError:
+    blpapi = None  # type: ignore[assignment]
 
 # Bloomberg session setup
-SESSION_OPTIONS = blpapi.SessionOptions()
-SESSION_OPTIONS.setServerHost("localhost")
-SESSION_OPTIONS.setServerPort(8194)
+if blpapi is not None:
+    SESSION_OPTIONS = blpapi.SessionOptions()
+    SESSION_OPTIONS.setServerHost("localhost")
+    SESSION_OPTIONS.setServerPort(8194)
+else:
+    SESSION_OPTIONS = None
+
+DEFAULT_MIN_MARKET_CAP = 1e11  # KRW 100 billion
+DEFAULT_MIN_TURNOVER = 1e8     # KRW 100 million
+
+
+def _extract_ticker_code(text: str) -> str:
+    """Extract 6-digit Korean stock code from any ticker text."""
+    match = re.search(r"(\d{6})", str(text or ""))
+    return match.group(1) if match else ""
+
+
+def _infer_market_from_text(text: str) -> str:
+    """Infer KOSPI/KOSDAQ from ticker text."""
+    upper = str(text or "").upper()
+    if " KQ" in upper or "KOSDAQ" in upper:
+        return "KOSDAQ"
+    return "KOSPI"
+
+
+def _to_bbg_equity_ticker(code: str, market: str) -> str:
+    """Convert code + market to Bloomberg equity ticker."""
+    suffix = "KQ" if market == "KOSDAQ" else "KS"
+    return f"{code} {suffix} Equity"
+
+
+def _normalize_member_tickers(members: list[str]) -> list[str]:
+    """Normalize index member strings to Bloomberg equity ticker format."""
+    normalized = []
+    seen: set[tuple[str, str]] = set()
+
+    for raw in members:
+        code = _extract_ticker_code(raw)
+        if not code:
+            continue
+        market = _infer_market_from_text(raw)
+        key = (code, market)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(_to_bbg_equity_ticker(code, market))
+
+    return normalized
+
+
+def _resolve_market_cap_threshold(min_market_cap: float, caps: pd.Series) -> float:
+    """
+    Resolve market-cap threshold scale.
+
+    Some local datasets store market cap in million KRW, so we adapt the threshold
+    if the observed scale is clearly smaller than KRW units.
+    """
+    clean_caps = pd.to_numeric(caps, errors="coerce").dropna()
+    clean_caps = clean_caps[clean_caps > 0]
+    if clean_caps.empty:
+        return float(min_market_cap)
+
+    p95 = float(clean_caps.quantile(0.95))
+    if min_market_cap >= 1e10 and p95 < (min_market_cap / 1_000):
+        return float(min_market_cap) / 1_000_000
+
+    return float(min_market_cap)
+
+
+def build_local_dynamic_universe(
+    local_prices_path: Path,
+    n_stocks: int,
+    min_market_cap: float = DEFAULT_MIN_MARKET_CAP,
+    min_turnover: float = DEFAULT_MIN_TURNOVER,
+) -> list[str]:
+    """
+    Build KOSPI+KOSDAQ universe from local prices.parquet with market-cap filter.
+    """
+    if not local_prices_path.exists():
+        print(f"Local prices file not found: {local_prices_path}")
+        return []
+
+    print(f"Building dynamic universe from local prices: {local_prices_path}")
+    prices = pd.read_parquet(local_prices_path)
+    if prices.empty or "date" not in prices.columns or "ticker" not in prices.columns:
+        print("Local prices schema is invalid or empty")
+        return []
+
+    prices["date"] = pd.to_datetime(prices["date"], errors="coerce")
+    prices = prices.dropna(subset=["date", "ticker"])
+    if prices.empty:
+        return []
+
+    latest = prices[prices["date"] == prices["date"].max()].copy()
+    latest["ticker_code"] = latest["ticker"].map(_extract_ticker_code)
+    latest = latest[latest["ticker_code"] != ""]
+    latest["market"] = latest["ticker"].map(_infer_market_from_text)
+
+    market_cap = pd.to_numeric(latest.get("market_cap"), errors="coerce")
+    market_cap_fund = pd.to_numeric(latest.get("market_cap_fund"), errors="coerce")
+    latest["market_cap_resolved"] = market_cap.fillna(market_cap_fund)
+
+    if latest["market_cap_resolved"].notna().any():
+        cap_threshold = _resolve_market_cap_threshold(
+            min_market_cap, latest["market_cap_resolved"]
+        )
+        latest = latest[latest["market_cap_resolved"] >= cap_threshold]
+
+    if min_turnover > 0 and "turnover" in latest.columns:
+        turnover = pd.to_numeric(latest["turnover"], errors="coerce")
+        if turnover.notna().any():
+            latest = latest[turnover >= float(min_turnover)]
+
+    latest = latest.sort_values(
+        ["market_cap_resolved", "turnover", "volume"],
+        ascending=False,
+        na_position="last",
+    )
+    latest = latest.drop_duplicates(subset=["ticker_code"], keep="first")
+    latest = latest.head(n_stocks)
+
+    market_mix = latest["market"].value_counts().to_dict()
+    print(
+        f"Dynamic universe selected: {len(latest)} tickers, "
+        f"market mix={market_mix}"
+    )
+
+    return [
+        _to_bbg_equity_ticker(code=row["ticker_code"], market=row["market"])
+        for _, row in latest.iterrows()
+    ]
 
 
 def create_session():
     """Create Bloomberg session."""
+    if blpapi is None or SESSION_OPTIONS is None:
+        raise ModuleNotFoundError(
+            "blpapi is not installed. Install Bloomberg Python API before fetching data."
+        )
+
     session = blpapi.Session(SESSION_OPTIONS)
     if not session.start():
         raise ConnectionError("Failed to start Bloomberg session")
@@ -68,7 +205,8 @@ def fetch_historical_data(
                 ticker = security_data.getElementAsString("security")
 
                 # Clean up ticker name
-                clean_ticker = ticker.replace(" KS Equity", "").replace(" Equity", "")
+                clean_ticker = _extract_ticker_code(ticker)
+                market = _infer_market_from_text(ticker)
 
                 if security_data.hasElement("fieldData"):
                     field_data_array = security_data.getElement("fieldData")
@@ -78,6 +216,7 @@ def fetch_historical_data(
 
                         record = {
                             "ticker": clean_ticker,
+                            "market": market,
                             "date": pd.Timestamp(field_data.getElementAsDatetime("date")),
                         }
 
@@ -237,118 +376,54 @@ def generate_labels(prices_df: pd.DataFrame, forward_days: int = 21) -> pd.DataF
     return pd.DataFrame(label_records)
 
 
-# KOSPI 200 major tickers (Korean stock codes)
-KOSPI200_TICKERS = [
-    "005930",  # Samsung Electronics
-    "000660",  # SK Hynix
-    "035420",  # Naver
-    "005380",  # Hyundai Motor
-    "051910",  # LG Chem
-    "006400",  # Samsung SDI
-    "035720",  # Kakao
-    "068270",  # Celltrion
-    "028260",  # Samsung C&T
-    "012330",  # Hyundai Mobis
-    "055550",  # Shinhan Financial
-    "105560",  # KB Financial
-    "096770",  # SK Innovation
-    "003670",  # Posco Holdings
-    "066570",  # LG Electronics
-    "086790",  # Hana Financial
-    "034730",  # SK
-    "017670",  # SK Telecom
-    "015760",  # Korea Electric Power
-    "032830",  # Samsung Life
-    "003550",  # LG
-    "018260",  # Samsung SDS
-    "000270",  # Kia
-    "033780",  # KT&G
-    "009150",  # Samsung Electro-Mechanics
-    "316140",  # Woori Financial
-    "010950",  # S-Oil
-    "090430",  # Amorepacific
-    "011170",  # Lotte Chem
-    "036570",  # NCsoft
-    "030200",  # KT
-    "000810",  # Samsung Fire
-    "034020",  # Doosan Enerbility
-    "005490",  # Posco
-    "009540",  # Hyundai Heavy
-    "267250",  # HD Hyundai
-    "010130",  # Korea Zinc
-    "018880",  # Hanon Systems
-    "047050",  # Daewoo E&C
-    "011780",  # Kumho Petrochemical
-    "024110",  # Industrial Bank
-    "323410",  # Kakao Bank
-    "259960",  # Krafton
-    "352820",  # Hive
-    "003490",  # Korean Air
-    "097950",  # CJ CheilJedang
-    "000720",  # Hyundai E&C
-    "207940",  # Samsung Biologics
-    "034220",  # LG Display
-    "010140",  # Samsung Heavy
-    "021240",  # Woongjin Coway
-    "028050",  # Samsung Engineering
-    "005830",  # DB Insurance
-    "032640",  # LG Uplus
-    "011200",  # HMM
-    "006800",  # Mirae Asset
-    "139480",  # E-Mart
-    "161390",  # Hankook Tire
-    "001040",  # CJ
-    "004020",  # Hyundai Steel
-    "088350",  # Hanwha Life
-    "009830",  # Hanwha Solution
-    "000880",  # Hanwha
-    "078930",  # GS
-    "036460",  # Korea Gas
-    "051900",  # LG H&H
-    "004170",  # Shinsegae
-    "010620",  # Hyundai Mipo
-    "003410",  # Ssangyong C&E
-    "006360",  # GS E&C
-    "042660",  # Daewoo Shipbuilding
-    "002790",  # Amore G
-    "004990",  # Lotte
-    "000100",  # Yuhan
-    "011070",  # LG Innotek
-    "271560",  # Orion
-    "008770",  # Hotel Shilla
-    "003620",  # SK Networks
-    "002380",  # KCC
-    "004800",  # Hyosung
-    "241560",  # Doosan Bobcat
-    "120110",  # Kolon Industries
-    "329180",  # HD Hyundai Marine
-    "069500",  # KODEX 200
-    "114090",  # GKL
-    "005940",  # NH Investment
-    "047810",  # Korea Aerospace
-    "010060",  # OCI Holdings
-    "071050",  # Korea Investment
-    "006280",  # Green Cross
-    "128940",  # Hanmi Pharm
-    "000150",  # Doosan
-    "012450",  # Hanwha Aerospace
-    "034730",  # SK Inc
-    "000210",  # Daelim Industrial
-    "028670",  # Pan Ocean
-    "079550",  # LIG Nex1
-    "004370",  # Nongshim
-    "005850",  # Samsung Card
-    "039490",  # Kiwoom Securities
-]
+def get_member_universe_from_indexes(
+    session: blpapi.Session,
+    index_tickers: list[str],
+) -> list[str]:
+    """Fetch and normalize member universe from one or more Bloomberg indexes."""
+    members_raw: list[str] = []
+
+    for index_ticker in index_tickers:
+        print(f"Trying to fetch {index_ticker} members...")
+        index_members = get_index_members_bds(session, index_ticker)
+        print(f"  {index_ticker}: {len(index_members)} raw members")
+        members_raw.extend(index_members)
+
+    normalized = _normalize_member_tickers(members_raw)
+    print(f"Combined normalized members: {len(normalized)}")
+    return normalized
 
 
 def main():
     parser = argparse.ArgumentParser(description="Fetch Bloomberg data")
-    parser.add_argument("--index", type=str, default="KOSPI200 Index", help="Index ticker")
+    parser.add_argument(
+        "--index",
+        type=str,
+        default="KOSPI Index,KOSDAQ Index",
+        help='Comma-separated index tickers (e.g., "KOSPI Index,KOSDAQ Index")',
+    )
     parser.add_argument("--n-stocks", type=int, default=100, help="Number of stocks")
     parser.add_argument("--start-date", type=str, default="2020-01-01", help="Start date")
     parser.add_argument("--end-date", type=str, default="2024-12-31", help="End date")
     parser.add_argument("--output-dir", type=str, default="data/processed", help="Output directory")
+    parser.add_argument(
+        "--local-prices",
+        type=str,
+        default="data/processed/prices.parquet",
+        help="Local prices parquet for dynamic universe fallback/filter",
+    )
+    parser.add_argument(
+        "--min-market-cap",
+        type=float,
+        default=DEFAULT_MIN_MARKET_CAP,
+        help="Minimum market cap (KRW basis; auto-scaled if local data uses smaller units)",
+    )
+    parser.add_argument(
+        "--min-turnover",
+        type=float,
+        default=DEFAULT_MIN_TURNOVER,
+        help="Minimum turnover for local dynamic universe filter",
+    )
 
     args = parser.parse_args()
 
@@ -365,17 +440,40 @@ def main():
     session = create_session()
     print("Connected.")
 
-    # Try to get index members from Bloomberg
-    print(f"Trying to fetch {args.index} members...")
-    members = get_index_members_bds(session, args.index)
+    # 1) Try index-member universe first (KOSPI + KOSDAQ)
+    index_list = [s.strip() for s in args.index.split(",") if s.strip()]
+    members = get_member_universe_from_indexes(session, index_list) if index_list else []
 
-    if len(members) == 0:
-        print("Using predefined KOSPI200 tickers...")
-        # Use predefined tickers
-        tickers = [f"{t} KS Equity" for t in KOSPI200_TICKERS[:args.n_stocks]]
+    # 2) Build local dynamic universe as fallback and/or supplement
+    dynamic_local = build_local_dynamic_universe(
+        local_prices_path=Path(args.local_prices),
+        n_stocks=max(args.n_stocks * 2, args.n_stocks),
+        min_market_cap=args.min_market_cap,
+        min_turnover=args.min_turnover,
+    )
+
+    if members:
+        print("Using index member universe as primary source")
+        tickers = members[:args.n_stocks]
+
+        # Fill shortage with local dynamic universe
+        if len(tickers) < args.n_stocks:
+            seen_codes = {_extract_ticker_code(t) for t in tickers}
+            for t in dynamic_local:
+                code = _extract_ticker_code(t)
+                if code in seen_codes:
+                    continue
+                tickers.append(t)
+                seen_codes.add(code)
+                if len(tickers) >= args.n_stocks:
+                    break
     else:
-        print(f"Found {len(members)} members from Bloomberg")
-        tickers = [f"{t} Equity" if " Equity" not in t else t for t in members[:args.n_stocks]]
+        print("No index members found. Falling back to local dynamic universe.")
+        tickers = dynamic_local[:args.n_stocks]
+
+    if not tickers:
+        session.stop()
+        raise RuntimeError("No tickers resolved. Check Bloomberg index symbols or local prices file.")
 
     print(f"Will fetch data for {len(tickers)} tickers")
     print(f"First 5 tickers: {tickers[:5]}")

@@ -152,7 +152,7 @@ ENSEMBLE = {
 
     # LLM orchestrator (순차 파이프라인에서 Gemini가 담당)
     "use_llm_orchestrator": True,
-    "llm_model": "gemini-2.5-flash",
+    "llm_model": "gemini-3-flash",
     "llm_temperature": 0.3,
     "llm_timeout": 60.0,
 
@@ -212,7 +212,7 @@ SCHEDULE = {
 # =============================================================================
 LLM_CONFIG = {
     # Gemini (앙상블 오케스트레이션, 시장 분석)
-    "gemini_model": "gemini-2.5-flash",
+    "gemini_model": "gemini-3-flash",
     "gemini_temperature": 0.3,
     "gemini_timeout": 60.0,
     # Ollama (파인튜닝 모델 - 전략 특화 시그널 생성)

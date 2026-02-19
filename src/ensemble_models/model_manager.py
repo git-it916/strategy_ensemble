@@ -88,6 +88,8 @@ class ModelManager:
             "data": data_meta or {},
             "strategies": strategy_metas,
             "ensemble": {
+                "class": ensemble.__class__.__name__,
+                "module": ensemble.__class__.__module__,
                 "config": ensemble.config,
                 "weights": ensemble.get_weights(),
                 "file": str(ensemble_path),
@@ -117,8 +119,6 @@ class ModelManager:
         Returns:
             Fully restored EnsembleAgent with all state
         """
-        from ..ensemble.agent import EnsembleAgent
-
         if not self.registry_path.exists():
             raise FileNotFoundError(
                 f"Registry not found at {self.registry_path}. "
@@ -138,7 +138,22 @@ class ModelManager:
 
         # 2. Create EnsembleAgent with loaded strategies
         ensemble_config = registry["ensemble"].get("config", {})
-        ensemble = EnsembleAgent(strategies=strategies, config=ensemble_config)
+        ensemble_meta = registry.get("ensemble", {})
+        ensemble_cls_name = ensemble_meta.get("class")
+        ensemble_module = ensemble_meta.get("module")
+
+        if ensemble_cls_name and ensemble_module:
+            ensemble_cls = self._resolve_class(ensemble_cls_name, ensemble_module)
+        else:
+            # Backward-compat: older registries don't store class/module.
+            if ensemble_config.get("use_llm_orchestrator", False):
+                from ..ensemble.llm_orchestrator import LLMEnsembleOrchestrator
+                ensemble_cls = LLMEnsembleOrchestrator
+            else:
+                from ..ensemble.agent import EnsembleAgent
+                ensemble_cls = EnsembleAgent
+
+        ensemble = ensemble_cls(strategies=strategies, config=ensemble_config)
 
         # 3. Restore full ensemble state (score_board, weights, performance)
         ensemble_path = Path(registry["ensemble"]["file"])

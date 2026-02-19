@@ -18,10 +18,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib
+import inspect
 import json
+import pkgutil
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -130,6 +135,90 @@ def _sample_hpo_params(trial, strategy_name: str) -> dict:
             "reg_lambda": trial.suggest_float("reg_lambda", 0.1, 5.0),
         }
     return {}
+
+
+def _to_snake_case(name: str) -> str:
+    """Convert CamelCase class names to snake_case strategy names."""
+    step1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
+    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", step1).lower()
+
+
+def _build_openclaw_factory(strategy_name: str, strategy_cls):
+    """Build a resilient factory for dynamically discovered OpenClaw strategies."""
+    def _factory():
+        cfg = _get_strategy_config(strategy_name)
+
+        for kwargs in (
+            {"name": strategy_name, "config": cfg},
+            {"config": cfg},
+            {"name": strategy_name},
+            {},
+        ):
+            try:
+                return strategy_cls(**kwargs)
+            except TypeError:
+                continue
+
+        # If constructor signature is unusual, surface the original error.
+        return strategy_cls()
+
+    return _factory
+
+
+def _discover_openclaw_strategies() -> dict[str, Any]:
+    """
+    Discover strategy classes under src.alphas.openclaw_1 dynamically.
+
+    Any subclass of BaseAlpha in that package is auto-registered.
+    Strategy name priority:
+      1) class attr STRATEGY_NAME / NAME
+      2) class name converted to snake_case
+    """
+    from src.alphas.base_alpha import BaseAlpha
+
+    try:
+        import src.alphas.openclaw_1 as openclaw_pkg
+    except Exception as e:
+        logger.warning(f"OpenClaw package import failed: {e}")
+        return {}
+
+    package_paths = getattr(openclaw_pkg, "__path__", None)
+    if not package_paths:
+        return {}
+
+    discovered: dict[str, Any] = {}
+
+    for module_info in pkgutil.iter_modules(package_paths):
+        if module_info.name.startswith("_"):
+            continue
+
+        module_name = f"{openclaw_pkg.__name__}.{module_info.name}"
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as e:
+            logger.warning(f"OpenClaw module import failed ({module_name}): {e}")
+            continue
+
+        for _, cls in inspect.getmembers(module, inspect.isclass):
+            if cls.__module__ != module.__name__:
+                continue
+            if not issubclass(cls, BaseAlpha) or cls is BaseAlpha:
+                continue
+
+            strategy_name = (
+                getattr(cls, "STRATEGY_NAME", None)
+                or getattr(cls, "NAME", None)
+                or _to_snake_case(cls.__name__.replace("Alpha", ""))
+            )
+            if not isinstance(strategy_name, str):
+                continue
+            strategy_name = strategy_name.strip()
+            if not strategy_name or strategy_name in discovered:
+                continue
+
+            discovered[strategy_name] = cls
+
+    return discovered
 
 
 def _build_cv_splits(
@@ -397,11 +486,28 @@ def initialize_strategies(strategy_names: list[str] | None = None):
         ),
     }
 
+    openclaw_classes = _discover_openclaw_strategies()
+    for name, cls in openclaw_classes.items():
+        strategy_map.setdefault(name, _build_openclaw_factory(name, cls))
+
+    if openclaw_classes:
+        logger.info(
+            f"Discovered OpenClaw strategies: {sorted(openclaw_classes.keys())}"
+        )
+
     if strategy_names is None:
-        strategy_names = [
+        base_names = [
             name for name, config in STRATEGIES.items()
             if config.get("enabled", True)
         ]
+        openclaw_names = [
+            name for name in openclaw_classes
+            if STRATEGIES.get(name, {}).get("enabled", True)
+        ]
+        strategy_names = []
+        for name in [*base_names, *openclaw_names]:
+            if name not in strategy_names:
+                strategy_names.append(name)
 
     for name in strategy_names:
         if name in strategy_map:

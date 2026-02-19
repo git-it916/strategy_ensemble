@@ -146,9 +146,9 @@ class VolatilityBreakoutAlpha(BaseAlpha):
                     score = 0.0
 
             # Volume confirmation
-            if self.volume_confirm and "PX_VOLUME" in recent.columns:
-                avg_volume = recent.iloc[:-1]["PX_VOLUME"].mean()
-                current_volume = recent.iloc[-1]["PX_VOLUME"]
+            if self.volume_confirm and "volume" in recent.columns:
+                avg_volume = recent.iloc[:-1]["volume"].mean()
+                current_volume = recent.iloc[-1]["volume"]
 
                 if avg_volume > 0 and current_volume > 0:
                     volume_ratio = current_volume / avg_volume

@@ -29,8 +29,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import signal
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -50,6 +52,7 @@ from config.settings import (
     LLM_CONFIG,
     WEBSOCKET_CONFIG,
     PIPELINE,
+    UNIVERSE,
     INVERSE_MAPPING,
 )
 from config.logging_config import setup_logging
@@ -108,6 +111,8 @@ class SequentialPipeline:
         self._notifier = None
         self._ws = None
         self._news_collector = None
+        self._news_loop: asyncio.AbstractEventLoop | None = None
+        self._news_thread: threading.Thread | None = None
 
         # Data
         self._prices: pd.DataFrame | None = None
@@ -115,6 +120,8 @@ class SequentialPipeline:
         self._ml_strategies: dict = {}
         self._technical_strategies: dict = {}
         self._universe: list[str] = []
+        self._universe_data_tickers: list[str] = []
+        self._order_to_data_ticker: dict[str, str] = {}
 
         # Timing
         self._candle_count = 0
@@ -142,31 +149,36 @@ class SequentialPipeline:
         # 2. Load ML + Technical strategies (as data sources, not decision makers)
         self._load_strategies()
 
-        # 3. Initialize ContextBuilder
+        # 3. Initialize Telegram news collector
+        self._init_news_collector()
+
+        # 4. Initialize ContextBuilder
         self._init_context_builder()
 
-        # 4. Initialize LLM (Fund Manager)
+        # 5. Initialize LLM (Fund Manager)
         self._init_llm()
 
-        # 5. Initialize Risk Manager
+        # 6. Initialize Risk Manager
         self._init_risk_manager()
 
-        # 6. Initialize Approval Agent
+        # 7. Initialize Approval Agent
         self._init_approval_agent()
 
-        # 7. Initialize Broker (KIS API)
+        # 8. Initialize Broker (KIS API)
         self._init_broker()
 
-        # 8. Initialize WebSocket
+        # 9. Initialize WebSocket
         self._init_websocket()
 
-        # 9. Initialize Telegram Notifier
+        # 10. Initialize Telegram Notifier
         self._init_notifier()
 
         logger.info("All pipeline components initialized")
 
     def _load_data(self) -> None:
         """Load price and feature data."""
+        from src.pipeline import build_universe_snapshot, normalize_order_ticker
+
         prices_path = PROCESSED_DATA_DIR / "prices.parquet"
         features_path = PROCESSED_DATA_DIR / "features.parquet"
 
@@ -183,17 +195,62 @@ class SequentialPipeline:
             self._features["date"] = pd.to_datetime(self._features["date"])
             logger.info(f"Loaded {len(self._features)} feature records")
 
-        # Universe
-        latest_date = self._prices["date"].max()
-        recent = self._prices[self._prices["date"] == latest_date]
-        self._universe = recent["ticker"].tolist()[
-            : PIPELINE.get("max_positions", 20) * 5
-        ]
-        logger.info(f"Universe: {len(self._universe)} stocks")
+        # Universe: KOSPI/KOSDAQ + 시총(기본 1000억) 필터
+        universe_size = PIPELINE.get("max_positions", 20) * 5
+        universe_df = build_universe_snapshot(
+            prices=self._prices,
+            min_market_cap=PIPELINE.get(
+                "min_market_cap",
+                UNIVERSE.get("min_market_cap", 0),
+            ),
+            min_turnover=UNIVERSE.get("min_volume", 0),
+            max_stocks=universe_size,
+            allowed_markets=("KOSPI", "KOSDAQ"),
+        )
+
+        if universe_df.empty:
+            logger.warning("Universe filter returned 0 rows. Falling back to latest snapshot.")
+            latest_date = self._prices["date"].max()
+            recent = self._prices[self._prices["date"] == latest_date].copy()
+            if "volume" in recent.columns:
+                recent = recent.sort_values("volume", ascending=False)
+            recent["ticker_data"] = recent["ticker"].astype(str)
+            recent["ticker_order"] = recent["ticker_data"].map(normalize_order_ticker)
+            recent = recent.drop_duplicates(subset=["ticker_order"], keep="first").head(
+                universe_size
+            )
+
+            self._universe_data_tickers = recent["ticker_data"].tolist()
+            self._universe = recent["ticker_order"].tolist()
+            self._order_to_data_ticker = dict(
+                zip(recent["ticker_order"], recent["ticker_data"])
+            )
+        else:
+            self._universe_data_tickers = universe_df["ticker_data"].tolist()
+            self._universe = universe_df["ticker_order"].tolist()
+            self._order_to_data_ticker = dict(
+                zip(universe_df["ticker_order"], universe_df["ticker_data"])
+            )
+            market_mix = universe_df["market"].value_counts().to_dict()
+            logger.info(f"Universe market mix: {market_mix}")
+
+        # Keep only filtered universe in context data
+        if self._universe_data_tickers:
+            self._prices = self._prices[
+                self._prices["ticker"].astype(str).isin(self._universe_data_tickers)
+            ].copy()
+            if self._features is not None and "ticker" in self._features.columns:
+                self._features = self._features[
+                    self._features["ticker"].astype(str).isin(self._universe_data_tickers)
+                ].copy()
+
+        logger.info(f"Universe: {len(self._universe)} stocks (execution-ready tickers)")
 
     def _load_strategies(self) -> None:
         """Load trained ML and technical strategies as DATA SOURCES."""
         from src.ensemble_models import ModelManager
+        from src.alphas.llm import LLMAlpha
+        from src.alphas.ml import BaseMLAlpha
 
         manager = ModelManager(MODELS_DIR)
 
@@ -204,14 +261,36 @@ class SequentialPipeline:
             # Separate ML vs Technical strategies
             ml_names = set(PIPELINE.get("ml_strategies", []))
             tech_names = set(PIPELINE.get("technical_strategies", []))
+            openclaw_prefixes = tuple(
+                PIPELINE.get("openclaw_prefixes", ["openclaw_", "oc_"])
+            )
+            include_unlisted = bool(PIPELINE.get("include_unlisted_strategies", True))
 
             for name, strategy in all_strategies.items():
+                if isinstance(strategy, LLMAlpha):
+                    logger.info(f"  Skip LLM strategy as data source: {name}")
+                    continue
+
                 if name in ml_names:
                     self._ml_strategies[name] = strategy
                     logger.info(f"  ML data source: {name}")
                 elif name in tech_names:
                     self._technical_strategies[name] = strategy
                     logger.info(f"  Technical data source: {name}")
+                elif openclaw_prefixes and name.startswith(openclaw_prefixes):
+                    if isinstance(strategy, BaseMLAlpha):
+                        self._ml_strategies[name] = strategy
+                        logger.info(f"  OpenClaw ML data source: {name}")
+                    else:
+                        self._technical_strategies[name] = strategy
+                        logger.info(f"  OpenClaw technical data source: {name}")
+                elif include_unlisted:
+                    if isinstance(strategy, BaseMLAlpha):
+                        self._ml_strategies[name] = strategy
+                        logger.info(f"  Auto ML data source: {name}")
+                    else:
+                        self._technical_strategies[name] = strategy
+                        logger.info(f"  Auto technical data source: {name}")
 
             logger.info(
                 f"Loaded {len(self._ml_strategies)} ML + "
@@ -221,6 +300,94 @@ class SequentialPipeline:
         except FileNotFoundError as e:
             logger.warning(f"Could not load trained models: {e}")
             logger.warning("Pipeline will run with price data only")
+
+    def _init_news_collector(self) -> None:
+        """Initialize Telegram news collector (Telethon)."""
+        from src.etl import TelegramNewsCollector, parse_channels
+
+        tg_api_keys = self.keys.get("telegram_api", {})
+        api_id = str(tg_api_keys.get("api_id", "")).strip()
+        api_hash = str(tg_api_keys.get("api_hash", "")).strip()
+        channels_raw = tg_api_keys.get("channels", "")
+        channels = parse_channels(channels_raw)
+
+        if not api_id or not api_hash or "YOUR" in api_id or "YOUR" in api_hash:
+            logger.info("Telegram news collector not configured (telegram_api missing)")
+            return
+
+        if not channels:
+            logger.info("Telegram news collector not configured (channels empty)")
+            return
+
+        session_dir = Path(__file__).parent.parent / "data" / "telegram_sessions"
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        session_name = "telegram_collector"
+        self._news_collector = TelegramNewsCollector(
+            api_id=api_id,
+            api_hash=api_hash,
+            channels=channels,
+            session_name=session_name,
+            session_dir=str(session_dir),
+        )
+
+        session_file = session_dir / f"{session_name}.session"
+        if not session_file.exists():
+            logger.warning(
+                "Telegram news session not found. "
+                "Run `python src/etl/telegram_news.py` once to authenticate."
+            )
+            self._news_collector = None
+            return
+
+        logger.info(f"Telegram news collector initialized ({len(channels)} channels)")
+
+    def _start_news_collector(self) -> None:
+        """Start Telegram news collector in background thread."""
+        if self._news_collector is None:
+            return
+
+        if self._news_thread and self._news_thread.is_alive():
+            return
+
+        def _runner() -> None:
+            loop = asyncio.new_event_loop()
+            self._news_loop = loop
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self._news_collector.start())
+            except Exception as e:
+                logger.error(f"Telegram news collector stopped: {e}")
+            finally:
+                self._news_loop = None
+                try:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                except Exception:
+                    pass
+                loop.close()
+
+        self._news_thread = threading.Thread(
+            target=_runner,
+            name="telegram-news",
+            daemon=True,
+        )
+        self._news_thread.start()
+        logger.info("Telegram news collector started")
+
+    def _stop_news_collector(self) -> None:
+        """Stop Telegram news collector thread."""
+        if self._news_collector and self._news_loop and self._news_loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._news_collector.stop(),
+                    self._news_loop,
+                )
+                future.result(timeout=5)
+            except Exception as e:
+                logger.warning(f"Telegram news collector stop failed: {e}")
+
+        if self._news_thread and self._news_thread.is_alive():
+            self._news_thread.join(timeout=2)
 
     def _init_context_builder(self) -> None:
         """Initialize ContextBuilder."""
@@ -336,6 +503,9 @@ class SequentialPipeline:
     def run(self) -> None:
         """Main event loop."""
         self._running = True
+
+        # Start Telegram news collector (if configured)
+        self._start_news_collector()
 
         # Start WebSocket
         self._ws.start()
@@ -579,10 +749,11 @@ class SequentialPipeline:
         for stock_code, candle_list in candles.items():
             if candle_list:
                 latest = candle_list[-1]
+                ticker_data = self._order_to_data_ticker.get(stock_code, stock_code)
                 rows.append(
                     {
                         "date": pd.Timestamp(latest.start_time.date()),
-                        "ticker": stock_code,
+                        "ticker": ticker_data,
                         "open": latest.open,
                         "high": latest.high,
                         "low": latest.low,
@@ -621,6 +792,7 @@ class SequentialPipeline:
         self._running = False
         if self._ws:
             self._ws.stop()
+        self._stop_news_collector()
         logger.info("Pipeline stopped")
 
 

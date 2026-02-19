@@ -12,8 +12,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import pandas as pd
+
+from .universe import infer_market_from_ticker, normalize_order_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +77,14 @@ class RiskManager:
         orders: list[PositionOrder] = []
 
         for signal in llm_signals:
-            ticker = signal.get("ticker", "")
+            ticker_raw = str(signal.get("ticker", "")).strip()
+            ticker = normalize_order_ticker(ticker_raw)
             score = float(signal.get("score", 0))
             side = signal.get("side", "long").lower()
             reason = signal.get("reason", "")
+
+            if not ticker:
+                continue
 
             if abs(score) < 0.1:
                 continue  # 너무 약한 시그널 무시
@@ -87,7 +92,7 @@ class RiskManager:
             if side == "short" or score < 0:
                 # SHORT 시그널 → 인버스 ETF BUY로 변환
                 inverse_orders = self._convert_to_inverse(
-                    ticker, score, reason
+                    ticker_raw or ticker, score, reason
                 )
                 orders.extend(inverse_orders)
             else:
@@ -116,23 +121,23 @@ class RiskManager:
         self, ticker: str, score: float, reason: str
     ) -> list[PositionOrder]:
         """SHORT 시그널을 인버스 ETF 매수로 변환."""
-        orders = []
+        market = infer_market_from_ticker(ticker)
+        inverse_ticker = self.inverse_mapping.get(market)
+        if not inverse_ticker:
+            inverse_ticker = next(iter(self.inverse_mapping.values()))
+            market = "KOSPI"
 
-        # 종목 특정 숏이면 → 시장 인버스 ETF로 변환
-        # 시장/인덱스 숏이면 → 해당 인버스 ETF로 변환
-        for market, inverse_ticker in self.inverse_mapping.items():
-            orders.append(PositionOrder(
-                ticker=inverse_ticker,
+        return [
+            PositionOrder(
+                ticker=normalize_order_ticker(inverse_ticker),
                 side="BUY",
                 weight=0.0,
                 score=abs(score),
                 reason=f"[HEDGE via {market} inverse] {reason}",
                 is_inverse=True,
                 original_signal="short",
-            ))
-            break  # 기본은 KOSPI 인버스 하나만
-
-        return orders
+            )
+        ]
 
     def _apply_position_sizing(
         self, orders: list[PositionOrder]
@@ -196,10 +201,27 @@ class RiskManager:
         if not buy_orders:
             return pd.DataFrame(columns=["ticker", "weight"])
 
-        return pd.DataFrame([
+        target_weights = pd.DataFrame([
             {"ticker": o.ticker, "weight": o.weight}
             for o in buy_orders
         ])
+
+        # 동일 티커(특히 인버스 ETF)가 여러 신호에서 중복될 수 있어 집계
+        target_weights = (
+            target_weights.groupby("ticker", as_index=False)["weight"].sum()
+        )
+        target_weights["weight"] = target_weights["weight"].clip(
+            lower=0.0,
+            upper=self.max_position_weight,
+        )
+        target_weights = target_weights[target_weights["weight"] > 0]
+
+        total_weight = float(target_weights["weight"].sum())
+        if total_weight > self.max_leverage and total_weight > 0:
+            scale = self.max_leverage / total_weight
+            target_weights["weight"] *= scale
+
+        return target_weights.sort_values("weight", ascending=False).reset_index(drop=True)
 
     def format_proposal(
         self, orders: list[PositionOrder], total_value: int = 0

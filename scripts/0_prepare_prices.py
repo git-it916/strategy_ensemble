@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-import pyarrow.parquet as pq
+import pyarrow.dataset as ds
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -26,6 +26,24 @@ from config.settings import DATA_DIR, PROCESSED_DATA_DIR
 from config.logging_config import setup_logging
 
 logger = setup_logging("prepare_prices")
+
+
+def _read_partitioned_parquet(base_dir: Path) -> pd.DataFrame:
+    """
+    Read hive-partitioned parquet directory safely.
+
+    Some synced datasets contain Windows ADS sidecar files such as
+    `data.parquet:Zone.Identifier`, which are not valid parquet files.
+    `exclude_invalid_files=True` prevents those from breaking the load.
+    """
+    dataset = ds.dataset(
+        base_dir,
+        format="parquet",
+        partitioning="hive",
+        exclude_invalid_files=True,
+    )
+    table = dataset.to_table()
+    return table.to_pandas()
 
 
 def load_market_daily(
@@ -52,7 +70,7 @@ def load_market_daily(
     logger.info("Loading market_daily data...")
 
     # Read all partitioned data
-    df = pd.read_parquet(market_dir)
+    df = _read_partitioned_parquet(market_dir)
 
     # Ensure date column is datetime
     df["date"] = pd.to_datetime(df["date"])
@@ -97,7 +115,7 @@ def load_fundamental_q(
     logger.info("Loading fundamental_Q data...")
 
     # Read all partitioned data
-    df = pd.read_parquet(fundamental_dir)
+    df = _read_partitioned_parquet(fundamental_dir)
 
     # Ensure date column is datetime
     df["date"] = pd.to_datetime(df["date"])

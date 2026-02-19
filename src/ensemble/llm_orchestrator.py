@@ -110,7 +110,11 @@ class LLMEnsembleOrchestrator(EnsembleAgent):
             strategy_performance = self.score_board.get_recent_performance(
                 lookback=self.performance_lookback
             )
-            strategy_correlations = self.score_board.get_correlation_matrix()
+            perf_correlations = self.score_board.get_correlation_matrix()
+            signal_correlations = self._build_signal_correlation_matrix(all_signals)
+            strategy_correlations = signal_correlations
+            if strategy_correlations.empty:
+                strategy_correlations = perf_correlations
 
             # Risk constraints from config
             from config.settings import TRADING
@@ -204,6 +208,38 @@ class LLMEnsembleOrchestrator(EnsembleAgent):
                 f"falling back to weighted average"
             )
             return super()._combine_signals(all_signals, date)
+
+    def _build_signal_correlation_matrix(
+        self,
+        all_signals: dict[str, pd.DataFrame],
+    ) -> pd.DataFrame:
+        """Build cross-strategy score correlation using current signal cross-section."""
+        if not all_signals:
+            return pd.DataFrame()
+
+        merged: pd.DataFrame | None = None
+        for name, df in all_signals.items():
+            if df.empty or "ticker" not in df.columns or "score" not in df.columns:
+                continue
+
+            frame = df[["ticker", "score"]].copy()
+            frame["score"] = pd.to_numeric(frame["score"], errors="coerce")
+            frame = frame.dropna(subset=["score"]).drop_duplicates("ticker")
+            frame = frame.rename(columns={"score": name})
+
+            if merged is None:
+                merged = frame
+            else:
+                merged = merged.merge(frame, on="ticker", how="outer")
+
+        if merged is None:
+            return pd.DataFrame()
+
+        score_frame = merged.drop(columns=["ticker"], errors="ignore")
+        if score_frame.shape[1] < 2:
+            return pd.DataFrame()
+
+        return score_frame.corr(min_periods=3)
 
     def _build_market_context(
         self, strategy_performance: dict[str, dict]
