@@ -2,6 +2,8 @@
 """
 실행코드
 python scripts/4_run_realtime.py --real
+python scripts/4_run_realtime.py --dry-run # 시그널 생성 + 승인 대기, 주문은 안함
+python scripts/4_run_realtime.py --no-approval # 승인 없이 자동 실행
 
 4. Run Real-time Trading — Sequential Pipeline
 
