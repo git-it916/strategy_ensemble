@@ -159,11 +159,15 @@ class ScoreWeightedAllocator(Allocator):
                 short_total = abs(df.loc[short_mask, "score"].sum())
                 weights.loc[short_mask] = df.loc[short_mask, "score"] / short_total * 0.5
 
-        # Apply max weight constraint
-        weights = weights.clip(upper=self.max_weight)
-
-        # Renormalize
-        weights = weights / weights.sum()
+        # Apply max weight constraint — iterate until convergence
+        for _ in range(10):
+            weights = weights.clip(upper=self.max_weight)
+            total = weights.sum()
+            if total <= 0:
+                break
+            weights = weights / total
+            if (weights <= self.max_weight + 1e-9).all():
+                break
 
         result = pd.DataFrame({
             "ticker": df["ticker"],
@@ -236,12 +240,15 @@ class RiskParityAllocator(Allocator):
         total = sum(weights.values())
         weights = {k: v / total for k, v in weights.items()}
 
-        # Apply max weight
-        weights = {k: min(v, self.max_weight) for k, v in weights.items()}
-
-        # Renormalize
-        total = sum(weights.values())
-        weights = {k: v / total for k, v in weights.items()}
+        # Apply max weight — iterate until convergence
+        for _ in range(10):
+            weights = {k: min(v, self.max_weight) for k, v in weights.items()}
+            total = sum(weights.values())
+            if total <= 0:
+                break
+            weights = {k: v / total for k, v in weights.items()}
+            if all(v <= self.max_weight + 1e-9 for v in weights.values()):
+                break
 
         result = pd.DataFrame([
             {"ticker": k, "weight": v}
@@ -319,12 +326,15 @@ class BlackLittermanAllocator(Allocator):
         else:
             weights = {k: 1 / len(adjusted_scores) for k in adjusted_scores}
 
-        # Apply max weight
-        weights = {k: min(v, self.max_weight) for k, v in weights.items()}
-
-        # Renormalize
-        total = sum(weights.values())
-        weights = {k: v / total for k, v in weights.items()}
+        # Apply max weight — iterate until convergence
+        for _ in range(10):
+            weights = {k: min(v, self.max_weight) for k, v in weights.items()}
+            total = sum(weights.values())
+            if total <= 0:
+                break
+            weights = {k: v / total for k, v in weights.items()}
+            if all(v <= self.max_weight + 1e-9 for v in weights.values()):
+                break
 
         result = pd.DataFrame([
             {"ticker": k, "weight": v}

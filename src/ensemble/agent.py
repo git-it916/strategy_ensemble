@@ -200,9 +200,18 @@ class EnsembleAgent:
                     total_weight += weight
                     contributions[strat_name] = score * weight
 
-            # Normalize
-            if total_weight > 0:
-                final_score = weighted_score / total_weight
+            # Normalize by participating strategies' weight, then apply
+            # a coverage penalty so tickers covered by fewer strategies
+            # don't get artificially inflated scores.
+            total_all_weights = sum(self._current_weights.values())
+            if total_weight > 0 and total_all_weights > 0:
+                # Base score: normalize by participating weight
+                base_score = weighted_score / total_weight
+                # Coverage ratio: fraction of total weight that participated
+                coverage = total_weight / total_all_weights
+                # Apply sqrt coverage penalty — gentle discount
+                # 100% coverage → 1.0, 50% coverage → 0.71, 20% → 0.45
+                final_score = base_score * (coverage ** 0.5)
             else:
                 final_score = 0.0
 

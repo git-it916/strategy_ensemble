@@ -47,10 +47,10 @@ class FeatureEngineer:
         groups = prices.groupby("ticker")
 
         # --- Returns ---
-        prices["ret_1d"] = groups["close"].pct_change(1, fill_method=None)
-        prices["ret_5d"] = groups["close"].pct_change(5, fill_method=None)
-        prices["ret_20d"] = groups["close"].pct_change(20, fill_method=None)
-        prices["ret_60d"] = groups["close"].pct_change(60, fill_method=None)
+        prices["ret_1d"] = groups["close"].pct_change(1)
+        prices["ret_5d"] = groups["close"].pct_change(5)
+        prices["ret_20d"] = groups["close"].pct_change(20)
+        prices["ret_60d"] = groups["close"].pct_change(60)
         prices["log_ret_1d"] = np.log1p(prices["ret_1d"])
 
         # --- Moving average ratios ---
@@ -198,9 +198,7 @@ class FeatureEngineer:
 
         # Minute returns
         df = df.sort_values(["ticker", "datetime"])
-        df["bar_ret"] = df.groupby(["ticker", "date"])["close"].pct_change(
-            fill_method=None
-        )
+        df["bar_ret"] = df.groupby(["ticker", "date"])["close"].pct_change()
 
         results = []
 
@@ -332,7 +330,7 @@ class FeatureEngineer:
         prices = prices.sort_values(["ticker", "date"]).copy()
 
         # Per-stock daily returns
-        prices["_ret"] = prices.groupby("ticker")["close"].pct_change(fill_method=None)
+        prices["_ret"] = prices.groupby("ticker")["close"].pct_change()
         prices["_ma20"] = prices.groupby("ticker")["close"].transform(
             lambda x: x.rolling(20).mean()
         )

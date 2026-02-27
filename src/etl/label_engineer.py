@@ -50,7 +50,7 @@ class LabelEngineer:
 
         df["y_reg"] = (
             df.groupby("ticker")["close"]
-            .pct_change(horizon, fill_method=None)
+            .pct_change(horizon)
             .shift(-horizon)
         )
 
@@ -83,7 +83,7 @@ class LabelEngineer:
         df = prices[["date", "ticker", "close"]].copy()
         df = df.sort_values(["ticker", "date"])
 
-        df["_ret"] = df.groupby("ticker")["close"].pct_change(fill_method=None)
+        df["_ret"] = df.groupby("ticker")["close"].pct_change()
 
         # Forward rolling std of returns, then annualize
         df["y_reg"] = (
@@ -194,7 +194,7 @@ class LabelEngineer:
 
         elif label_type == "next_close_ret":
             df["y_reg"] = (
-                df.groupby("ticker")["close"].pct_change(fill_method=None).shift(-1)
+                df.groupby("ticker")["close"].pct_change().shift(-1)
             )
 
         else:

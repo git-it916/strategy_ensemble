@@ -112,49 +112,78 @@ class VolatilityBreakoutAlpha(BaseAlpha):
 
             # Current and historical prices
             current_close = recent.iloc[-1]["close"]
-            hist_closes = recent.iloc[:-1]["close"].values
+            hist = recent.iloc[:-1]
 
-            # Calculate range metrics
-            highest_high = recent.iloc[:-1]["close"].max()
-            lowest_low = recent.iloc[:-1]["close"].min()
+            # Use actual high/low columns for range (not just close)
+            if "high" in hist.columns and "low" in hist.columns:
+                highest_high = hist["high"].max()
+                lowest_low = hist["low"].min()
+            else:
+                highest_high = hist["close"].max()
+                lowest_low = hist["close"].min()
 
-            # ATR-like volatility
-            atr = np.std(hist_closes) * np.sqrt(252 / self.lookback)
+            # True ATR: max(high-low, |high-prev_close|, |low-prev_close|)
+            if "high" in hist.columns and "low" in hist.columns:
+                highs = hist["high"].values
+                lows = hist["low"].values
+                closes = hist["close"].values
+                tr_list = [highs[0] - lows[0]]  # first bar: just high-low
+                for i in range(1, len(highs)):
+                    tr = max(
+                        highs[i] - lows[i],
+                        abs(highs[i] - closes[i - 1]),
+                        abs(lows[i] - closes[i - 1]),
+                    )
+                    tr_list.append(tr)
+                atr = float(np.mean(tr_list))
+            else:
+                # Fallback: use daily return std as volatility proxy
+                hist_closes = hist["close"].values
+                returns = np.diff(hist_closes) / hist_closes[:-1]
+                atr = float(np.std(returns) * hist_closes[-1]) if len(returns) > 0 else 0
 
             if atr == 0:
                 continue
 
-            # Breakout score
+            # Breakout score — only trigger if magnitude exceeds threshold
             if current_close > highest_high:
                 # Upward breakout
                 breakout_magnitude = (current_close - highest_high) / atr
-                score = min(breakout_magnitude, 3.0)  # Cap at 3
+                if breakout_magnitude >= self.breakout_threshold:
+                    score = min(breakout_magnitude / (self.breakout_threshold * 2), 1.0)
+                else:
+                    score = breakout_magnitude / (self.breakout_threshold * 2) * 0.5
 
             elif current_close < lowest_low:
-                # Downward breakout (avoid or short)
+                # Downward breakout
                 breakout_magnitude = (lowest_low - current_close) / atr
-                score = -min(breakout_magnitude, 3.0)
+                if breakout_magnitude >= self.breakout_threshold:
+                    score = -min(breakout_magnitude / (self.breakout_threshold * 2), 1.0)
+                else:
+                    score = -breakout_magnitude / (self.breakout_threshold * 2) * 0.5
 
             else:
-                # No breakout
-                # Score based on position in range
+                # No breakout — mild directional bias
                 range_size = highest_high - lowest_low
                 if range_size > 0:
                     position = (current_close - lowest_low) / range_size
-                    score = (position - 0.5) * 0.5  # Mild directional bias
+                    score = (position - 0.5) * 0.3
                 else:
                     score = 0.0
 
-            # Volume confirmation
+            # Volume confirmation — boost but keep within [-1, 1]
             if self.volume_confirm and "volume" in recent.columns:
                 avg_volume = recent.iloc[:-1]["volume"].mean()
                 current_volume = recent.iloc[-1]["volume"]
 
                 if avg_volume > 0 and current_volume > 0:
                     volume_ratio = current_volume / avg_volume
-                    # Boost signal if volume confirms
                     if volume_ratio > 1.5 and score != 0:
-                        score *= min(volume_ratio, 2.0)
+                        boost = min(volume_ratio / 2.0, 1.5)  # Max 1.5x boost
+                        score *= boost
+
+            # Clamp final score to [-1, 1]
+            score = max(-1.0, min(1.0, score))
 
             signals_list.append({
                 "ticker": ticker,

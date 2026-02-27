@@ -184,7 +184,7 @@ class BaseAlpha(ABC):
         returns = [p["returns"] for p in recent]
 
         mean_ret = np.mean(returns)
-        std_ret = np.std(returns) if len(returns) > 1 else 0
+        std_ret = np.std(returns, ddof=1) if len(returns) > 1 else 0
         win_rate = np.mean([1 if r > 0 else 0 for r in returns])
         sharpe = mean_ret / std_ret * np.sqrt(252) if std_ret > 0 else 0
 

@@ -14,7 +14,7 @@ from typing import Any
 
 import pandas as pd
 
-from .universe import infer_market_from_ticker, normalize_order_ticker
+from .universe import normalize_order_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +50,8 @@ class RiskManager:
         max_leverage: float = 1.0,
         min_trade_value: int = 100_000,
     ):
-        from config.settings import INVERSE_MAPPING
-        self.inverse_mapping = inverse_mapping or INVERSE_MAPPING
+        # Binance futures can short directly — inverse mapping is optional
+        self.inverse_mapping = inverse_mapping or {}
         self.inverse_tickers = set(self.inverse_mapping.values())
         self.max_position_weight = max_position_weight
         self.max_positions = max_positions
@@ -120,21 +120,31 @@ class RiskManager:
     def _convert_to_inverse(
         self, ticker: str, score: float, reason: str
     ) -> list[PositionOrder]:
-        """SHORT 시그널을 인버스 ETF 매수로 변환."""
-        market = infer_market_from_ticker(ticker)
-        inverse_ticker = self.inverse_mapping.get(market)
-        if not inverse_ticker:
-            inverse_ticker = next(iter(self.inverse_mapping.values()))
-            market = "KOSPI"
+        """SHORT 시그널 처리: 바이낸스 선물은 직접 숏 가능."""
+        if self.inverse_mapping:
+            # Legacy: 인버스 ETF 매핑이 있으면 사용
+            inverse_ticker = next(iter(self.inverse_mapping.values()), ticker)
+            return [
+                PositionOrder(
+                    ticker=normalize_order_ticker(inverse_ticker),
+                    side="BUY",
+                    weight=0.0,
+                    score=abs(score),
+                    reason=f"[HEDGE via inverse] {reason}",
+                    is_inverse=True,
+                    original_signal="short",
+                )
+            ]
 
+        # Binance futures: direct short position
         return [
             PositionOrder(
-                ticker=normalize_order_ticker(inverse_ticker),
-                side="BUY",
+                ticker=normalize_order_ticker(ticker),
+                side="SELL",
                 weight=0.0,
                 score=abs(score),
-                reason=f"[HEDGE via {market} inverse] {reason}",
-                is_inverse=True,
+                reason=reason,
+                is_inverse=False,
                 original_signal="short",
             )
         ]
@@ -196,7 +206,7 @@ class RiskManager:
     def to_target_weights(
         self, orders: list[PositionOrder]
     ) -> pd.DataFrame:
-        """PositionOrder 리스트를 OrderManager가 인식하는 DataFrame으로 변환."""
+        """PositionOrder 리스트를 DataFrame으로 변환."""
         buy_orders = [o for o in orders if o.side == "BUY" and o.weight > 0]
         if not buy_orders:
             return pd.DataFrame(columns=["ticker", "weight"])

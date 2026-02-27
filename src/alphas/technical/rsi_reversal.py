@@ -138,15 +138,19 @@ class RSIReversalAlpha(BaseAlpha):
         signals = pd.DataFrame(signals_list)
 
         if signals.empty:
-            signals = pd.DataFrame(columns=["ticker", "score", "rsi"])
+            signals = pd.DataFrame(columns=["ticker", "score"])
+            rsi_values = {}
+        else:
+            rsi_values = dict(zip(signals["ticker"], signals["rsi"]))
 
         return AlphaResult(
             date=date,
-            signals=signals,
+            signals=signals[["ticker", "score"]],
             metadata={
                 "strategy": self.name,
-                "n_oversold": len(signals[signals["rsi"] < self.oversold]) if not signals.empty else 0,
-                "n_overbought": len(signals[signals["rsi"] > self.overbought]) if not signals.empty else 0,
+                "rsi_values": rsi_values,
+                "n_oversold": sum(1 for v in rsi_values.values() if v < self.oversold),
+                "n_overbought": sum(1 for v in rsi_values.values() if v > self.overbought),
             }
         )
 
@@ -163,20 +167,28 @@ class RSIReversalAlpha(BaseAlpha):
         self.overbought = state.get("overbought", 70.0)
 
     def _calculate_rsi(self, prices: np.ndarray) -> float:
-        """Calculate RSI from price array."""
+        """
+        Calculate RSI using Wilder's smoothed moving average (RMA).
+
+        Uses the full price history for proper EMA initialization,
+        matching the standard RSI used by TradingView and most platforms.
+        """
         if len(prices) < self.rsi_period + 1:
             return 50.0  # Neutral
 
-        # Calculate price changes
-        deltas = np.diff(prices[-(self.rsi_period + 1):])
-
-        # Separate gains and losses
+        deltas = np.diff(prices)
         gains = np.maximum(deltas, 0)
         losses = np.maximum(-deltas, 0)
 
-        # Average gains and losses
-        avg_gain = np.mean(gains)
-        avg_loss = np.mean(losses)
+        # Initialize with SMA over the first rsi_period
+        avg_gain = np.mean(gains[:self.rsi_period])
+        avg_loss = np.mean(losses[:self.rsi_period])
+
+        # Wilder's smoothing (RMA): iteratively update with smoothing factor
+        alpha = 1.0 / self.rsi_period
+        for i in range(self.rsi_period, len(gains)):
+            avg_gain = avg_gain * (1 - alpha) + gains[i] * alpha
+            avg_loss = avg_loss * (1 - alpha) + losses[i] * alpha
 
         if avg_loss == 0:
             return 100.0
@@ -184,4 +196,4 @@ class RSIReversalAlpha(BaseAlpha):
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
 
-        return rsi
+        return float(rsi)

@@ -1,263 +1,578 @@
-# Quant Ensemble - Regime-Detecting Strategy Selection System
+# Strategy Ensemble — 암호화폐 선물 자동매매 시스템
 
-한국 주식시장을 위한 레짐 기반 알파 전략 선별 및 앙상블 시스템
+바이낸스 USDT-M 무기한 선물을 대상으로, 여러 알파 전략의 신호를 결합하여 자동으로 매매하는 시스템입니다.
 
-#### 가상환경 코드
+```
 conda activate strategy_ensemble
+```
 
-## Overview
+---
 
-이 시스템은 시장 레짐(국면)을 감지하고, 각 레짐에 최적화된 알파 전략을 선택/가중하여 포트폴리오를 구성합니다.
+## 목차
 
-### Key Features
+1. [시스템 한눈에 보기](#1-시스템-한눈에-보기)
+2. [데이터는 어디서 오고, 어떻게 가공되는가](#2-데이터는-어디서-오고-어떻게-가공되는가)
+3. [알파 전략 — 매매 신호를 만드는 9가지 방법](#3-알파-전략--매매-신호를-만드는-9가지-방법)
+4. [앙상블 — 전략들을 하나로 합치는 원리](#4-앙상블--전략들을-하나로-합치는-원리)
+5. [OpenClaw — AI가 새 전략을 자동으로 만드는 시스템](#5-openclaw--ai가-새-전략을-자동으로-만드는-시스템)
+6. [실시간 매매 파이프라인](#6-실시간-매매-파이프라인)
+7. [폴더 구조 상세](#7-폴더-구조-상세)
+8. [실행 방법](#8-실행-방법)
+9. [주요 설정값](#9-주요-설정값)
 
-- **Regime Detection**: HMM/GMM 기반 시장 국면 분류
-- **Multiple Alpha Strategies**: 모멘텀, 평균회귀, 퀄리티 등 다양한 알파 전략
-- **Ensemble Methods**: MoE, Stacking, Meta-Labeling 앙상블
-- **Anti-Leakage**: 미래 정보 유출 방지를 위한 철저한 검증
-- **Bloomberg Integration**: Bloomberg API를 통한 실시간 데이터 수집
-- **Walk-Forward Optimization**: 시계열 교차검증
+---
 
-## Project Structure
+## 1. 시스템 한눈에 보기
 
 ```
-quant_ensemble/
-├── config/                 # 설정 파일
-│   ├── backtest.yaml      # 백테스트 설정
-│   └── live.yaml          # 라이브 트레이딩 설정
-├── scripts/               # 실행 스크립트
-│   ├── run_etl.py        # ETL 파이프라인
-│   ├── train_models.py   # 모델 학습
-│   ├── run_backtest.py   # 백테스트 실행
-│   └── generate_dummy_data.py  # 테스트 데이터 생성
+┌─────────────────────────────────────────────────────────────────┐
+│                    Strategy Ensemble 전체 흐름                    │
+│                                                                  │
+│  바이낸스 거래소                                                   │
+│       │                                                          │
+│       ▼                                                          │
+│  ┌─────────┐    ┌──────────┐    ┌──────────┐    ┌─────────────┐ │
+│  │ 데이터   │───▶│ 9개 알파  │───▶│ 앙상블    │───▶│ 주문 실행    │ │
+│  │ 수집     │    │ 전략     │    │ (신호결합) │    │ (바이낸스)   │ │
+│  └─────────┘    └──────────┘    └──────────┘    └─────────────┘ │
+│       │                                    │                     │
+│       │         ┌──────────┐               │                     │
+│       └────────▶│ OpenClaw │───────────────┘                     │
+│                 │ (AI가 새  │   새 전략을 자동으로                  │
+│                 │ 전략 생성) │   앙상블에 추가                      │
+│                 └──────────┘                                     │
+│                                                                  │
+│  ┌──────────┐                                                    │
+│  │ 텔레그램  │◀── 알림 / 승인 요청 / 상태 보고                     │
+│  └──────────┘                                                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**핵심 아이디어**: 하나의 전략에 의존하지 않고, 서로 다른 관점의 9가지 전략을 동시에 돌린 뒤 그 신호를 종합하여 매매합니다. 시장 상황(강세/약세/횡보)에 따라 각 전략의 비중을 자동으로 조절합니다.
+
+---
+
+## 2. 데이터는 어디서 오고, 어떻게 가공되는가
+
+### 2.1 데이터 수집
+
+바이낸스 거래소에서 CCXT 라이브러리를 통해 두 종류의 데이터를 가져옵니다:
+
+| 데이터 | 내용 | 주기 |
+|--------|------|------|
+| **OHLCV 캔들** | 시가·고가·저가·종가·거래량 | 1일봉 (배치), 1분봉 (실시간) |
+| **펀딩비율** | 롱/숏 포지션 간 8시간마다 정산되는 비용 | 8시간 |
+
+- **대상**: 거래량 상위 50개 코인 (BTC, ETH, SOL 등)
+- **최소 거래량**: 1억 USDT 이상
+- **제외 종목**: BTCDOMUSDT, DEFIUSDT 등 인덱스 토큰
+
+### 2.2 피처 가공 (Feature Engineering)
+
+수집된 원시 데이터를 알파 전략이 사용할 수 있는 지표로 변환합니다:
+
+```
+원시 OHLCV 데이터
+    │
+    ├─▶ 수익률 계산: 1일/5일/20일/60일 수익률
+    ├─▶ 이동평균 비율: 현재가 ÷ 5일/10일/20일/60일 이동평균
+    ├─▶ RSI(14): 최근 14일간 상승/하락 비율 (0~100)
+    ├─▶ 볼린저밴드 %B: 현재가가 밴드 내 어디에 위치하는지 (0~1)
+    ├─▶ MACD: 단기-장기 이동평균 차이 (추세 강도)
+    └─▶ 변동성: 5일/20일 가격 변동폭
+```
+
+### 2.3 라벨 생성 (Label Engineering)
+
+ML 알파 학습을 위해 "미래 정답"을 만드는 단계입니다:
+
+| 라벨 | 의미 | 계산 |
+|------|------|------|
+| **수익률 라벨** | 앞으로 5일간 가격이 얼마나 오를까? | (5일 후 가격 - 현재가) ÷ 현재가 |
+| **변동성 라벨** | 앞으로 5일간 얼마나 흔들릴까? | 향후 5일 수익률의 표준편차 × √252 |
+| **레짐 라벨** | 지금 시장이 강세/약세/횡보 중 뭘까? | 20일 이동평균과 변동성 기반 분류 |
+
+> 주의: 라벨은 "미래" 데이터이므로, 실시간 매매에선 쓰지 않고 학습에만 사용합니다.
+
+### 2.4 저장 형식
+
+모든 가공 데이터는 `data/processed/` 폴더에 Parquet 파일로 저장됩니다. Parquet은 대량 수치 데이터를 빠르게 읽고 쓸 수 있는 형식입니다.
+
+---
+
+## 3. 알파 전략 — 매매 신호를 만드는 9가지 방법
+
+각 알파 전략은 모든 코인에 대해 **-1(강한 숏)부터 +1(강한 롱)**까지의 점수를 산출합니다.
+
+### 3.1 OpenClaw 규칙 기반 알파 (7개)
+
+#### ① Cross-Sectional Momentum (횡단면 모멘텀) — 가중치 20%
+
+**아이디어**: 최근 1~12개월간 많이 오른 코인은 계속 오르는 경향이 있다.
+
+**계산 방식**:
+1. 각 코인의 과거 252일~21일 사이 수익률을 계산 (최근 1개월은 제외 — 단기 반전 효과 회피)
+2. 전체 코인 중 이 수익률의 순위를 매김
+3. 순위 상위 = 롱(매수), 하위 = 숏(매도)
+
+**예시**: 50개 코인 중 SOL이 최근 11개월간 수익률 1위 → 점수 +1.0에 가까움
+
+---
+
+#### ② Funding Rate Carry (펀딩비 캐리) — 가중치 25% (최고 비중)
+
+**아이디어**: 펀딩비율이 음수인 코인은 숏 포지션이 롱 포지션에게 돈을 지불하므로, 롱을 잡으면 추가 수익이 생긴다.
+
+**계산 방식**:
+1. 각 코인의 최근 7일 평균 펀딩비율을 계산
+2. 펀딩비가 **낮은**(음수에 가까운) 코인일수록 높은 점수
+3. 반대로 펀딩비가 높은 코인은 숏 신호
+
+**핵심 논리**: 바이낸스 무기한 선물은 8시간마다 펀딩비를 정산합니다. 이건 "포지션 유지 비용"인데, 역으로 이걸 **수익원**으로 활용하는 전략입니다.
+
+---
+
+#### ③ Time Series Momentum (시계열 모멘텀) — 가중치 15%
+
+**아이디어**: 최근 20일간 올랐으면 계속 오르고, 내렸으면 계속 내린다.
+
+**계산 방식**:
+1. 최근 20일 누적 수익률 계산
+2. `tanh(수익률 × 10)`으로 -1~+1로 변환
+3. 양수면 롱, 음수면 숏
+
+**①과의 차이**: ①은 "다른 코인 대비 상대적으로 잘 올랐는가"를 보고, ③은 "이 코인 자체가 올랐는가"를 봅니다.
+
+---
+
+#### ④ Time Series Mean Reversion (시계열 평균회귀) — 가중치 10%
+
+**아이디어**: 너무 많이 올랐으면 되돌아오고, 너무 많이 내렸으면 반등한다.
+
+**계산 방식**: ③ Time Series Momentum과 **정반대** 신호. 즉 `-tanh(수익률 × 10)`.
+
+**존재 이유**: 모멘텀과 평균회귀는 서로 반대 전략이지만, 시장 상황에 따라 어느 쪽이 맞는지가 달라집니다. 둘 다 넣어두고 앙상블이 상황에 맞게 비중을 조절합니다.
+
+---
+
+#### ⑤ Price-Volume Divergence (가격-거래량 괴리) — 가중치 10%
+
+**아이디어**: 가격이 오르는데 거래량이 줄어들면 위험 신호, 가격이 오르면서 거래량도 늘면 건강한 상승.
+
+**계산 방식**:
+1. 최근 20일간 가격 변화율과 거래량 변화율의 **상관계수** 계산
+2. 높은 양의 상관 (둘 다 같이 움직임) → 추세 확인 → 롱
+3. 음의 상관 (가격은 오르는데 거래량은 줄어듦) → 약한 추세 → 숏
+
+---
+
+#### ⑥ Volume Momentum (거래량 모멘텀) — 가중치 10%
+
+**아이디어**: 거래량이 꾸준히 늘어나는 코인은 기관이나 큰 손이 관심을 갖고 있다는 신호.
+
+**계산 방식**:
+1. 최근 20일간 거래량의 기울기(추세) 계산
+2. 기울기를 평균 거래량으로 나눠서 정규화
+3. 거래량 증가 추세 = 매수 신호
+
+---
+
+#### ⑦ Low Volatility Anomaly (저변동성 이상현상) — 가중치 10%
+
+**아이디어**: 변동성이 낮은 코인이 역설적으로 위험 대비 높은 수익을 내는 현상.
+
+**계산 방식**:
+1. 각 코인의 20일 변동성 계산
+2. 전체 코인 중 변동성 순위를 매김
+3. 변동성이 **낮을수록** 높은 점수
+
+---
+
+### 3.2 기술적 알파 (2개)
+
+#### ⑧ RSI Reversal (RSI 반전) — 가중치 15%
+
+**아이디어**: RSI가 30 이하면 과매도(반등 기대), 70 이상이면 과매수(하락 기대).
+
+**계산 방식**:
+- RSI < 30 → 매수 신호 (30에서 멀수록 강한 신호)
+- RSI > 70 → 매도 신호 (70에서 멀수록 강한 신호)
+- RSI 30~70 → 신호 없음
+
+---
+
+#### ⑨ Volatility Breakout (변동성 돌파) — 가중치 15%
+
+**아이디어**: 가격이 최근 변동 범위를 크게 벗어나면, 그 방향으로 추세가 시작된다.
+
+**계산 방식**:
+1. 최근 20일 고가+ATR×1.5 = 상단 밴드, 저가-ATR×1.5 = 하단 밴드
+2. 종가가 상단 돌파 → 매수, 하단 돌파 → 매도
+3. **거래량 확인**: 돌파 시 거래량이 평소의 1.5배 이상이면 신호 강화
+
+---
+
+### 3.3 전략별 특성 요약
+
+| 전략 | 유형 | 강세장 | 약세장 | 횡보장 |
+|------|------|--------|--------|--------|
+| CS Momentum | 모멘텀 | ★★★ | ★ | ★★ |
+| Funding Carry | 캐리 | ★★ | ★★★ | ★★★ |
+| TS Momentum | 모멘텀 | ★★★ | ★★ | ★ |
+| Mean Reversion | 반전 | ★ | ★★ | ★★★ |
+| PV Divergence | 확인 | ★★ | ★★ | ★★ |
+| Volume Mom. | 모멘텀 | ★★★ | ★ | ★★ |
+| Low Vol | 팩터 | ★★ | ★★★ | ★★ |
+| RSI Reversal | 반전 | ★ | ★★ | ★★★ |
+| Vol Breakout | 돌파 | ★★★ | ★★ | ★ |
+
+---
+
+## 4. 앙상블 — 전략들을 하나로 합치는 원리
+
+### 4.1 기본 원리
+
+9개 전략이 각각 50개 코인에 -1~+1 점수를 매기면, 이걸 하나의 최종 점수로 합칩니다:
+
+```
+최종 점수 = (전략1 점수 × 가중치1 + 전략2 점수 × 가중치2 + ... ) ÷ 전체 가중치 합
+```
+
+### 4.2 가중치 결정 방식 (3단계)
+
+#### 1단계: 기본 가중치 (settings.py에서 설정)
+
+```
+Funding Rate Carry:  25%   ← 가장 높음 (안정적 수익원)
+CS Momentum:         20%
+TS Momentum:         15%
+RSI Reversal:        15%
+Vol Breakout:        15%
+Mean Reversion:      10%
+PV Divergence:       10%
+Volume Momentum:     10%
+Low Volatility:      10%
+```
+
+#### 2단계: 성과 기반 동적 조정
+
+최근 21일간 각 전략의 실제 수익을 추적하는 **ScoreBoard**가 있습니다:
+
+```
+성과 가중치 = 전략의 샤프비율 ÷ 전체 전략 샤프비율 합
+
+최종 가중치 = 기본 가중치 × 50% + 성과 가중치 × 50%
+```
+
+즉, 최근에 잘한 전략의 비중이 올라가고, 못한 전략의 비중이 내려갑니다.
+
+#### 3단계: 시장 레짐 조정
+
+시장 상황(강세/약세/횡보)에 따라 전략 가중치에 배율을 곱합니다:
+
+| 시장 상황 | 강화하는 전략 | 약화하는 전략 |
+|-----------|-------------|-------------|
+| **강세장** | 모멘텀 전략 ×1.5 | 평균회귀 ×0.6 |
+| **약세장** | 평균회귀 ×1.5, 캐리 ×1.4 | 모멘텀 ×0.5~0.6 |
+| **횡보장** | 평균회귀 ×1.3, PV 괴리 ×1.2 | 모멘텀 ×0.8 |
+
+### 4.3 포지션 배분 (Allocator)
+
+최종 점수가 정해지면, 실제로 얼마를 투자할지 정합니다:
+
+| 방식 | 설명 |
+|------|------|
+| **TopK** | 점수 상위 20개를 균등 배분 |
+| **ScoreWeighted** | 점수에 비례해서 배분 (점수 높으면 더 많이 투자) |
+| **RiskParity** | 변동성의 역수로 배분 (변동성 낮은 코인에 더 많이 투자) |
+| **BlackLitterman** | 점수를 변동성으로 나눠서 배분 (위험 대비 효율 기준) |
+
+**공통 제한**:
+- 개별 코인 최대 비중: 10%
+- 최대 보유 종목 수: 20개
+- 최대 레버리지: 3배
+
+---
+
+## 5. OpenClaw — AI가 새 전략을 자동으로 만드는 시스템
+
+### 5.1 무엇을 하는가
+
+OpenClaw는 Claude AI를 활용하여 **새로운 알파 전략을 자동으로 연구, 생성, 검증, 배포**하는 시스템입니다. 사람이 직접 전략을 짜는 대신, AI가 논문을 읽고, 전략 코드를 작성하고, 백테스트를 돌리고, 검증을 통과하면 실전에 투입합니다.
+
+### 5.2 작동 과정
+
+```
+    ┌───────────┐
+    │ 1. 검색   │  Brave Search로 알파 관련 논문/블로그 검색
+    └─────┬─────┘
+          ▼
+    ┌───────────┐
+    │ 2. 분석   │  Claude AI가 논문을 읽고 핵심 아이디어 추출
+    └─────┬─────┘
+          ▼
+    ┌───────────┐
+    │ 3. 코드   │  Claude Sonnet이 파이썬 전략 코드 자동 생성
+    │    생성    │  (BaseAlpha 클래스 상속, fit + generate_signals 구현)
+    └─────┬─────┘
+          ▼
+    ┌───────────┐
+    │ 4. 안전   │  금지된 코드가 없는지 검사
+    │    검사    │  (os, sys, subprocess, eval 등 차단)
+    └─────┬─────┘
+          ▼
+    ┌───────────┐
+    │ 5. 백테스트│  과거 데이터로 성과 검증
+    │           │  - 학습구간(70%)에서 훈련
+    │           │  - 검증구간(30%)에서 실제 성과 측정
+    └─────┬─────┘
+          ▼
+    ┌───────────┐
+    │ 6. 품질   │  통과 기준:
+    │    검증    │  · 샤프비율 ≥ 1.0
+    │           │  · 최대낙폭 ≤ 15%
+    │           │  · 기존 전략과 상관계수 ≤ 0.3
+    │           │  · 일일 회전율 ≤ 30%
+    └─────┬─────┘
+          ▼
+    ┌───────────┐
+    │ 7. 승인   │  텔레그램으로 결과 보고 → 사용자가 승인/거부
+    └─────┬─────┘
+          ▼
+    ┌───────────┐
+    │ 8. 배포   │  14일 페이퍼 트레이딩 → 성과 확인 → 실전 투입
+    └───────────┘
+```
+
+### 5.3 전략의 생명주기
+
+```
+탄생 (pending)
+  │
+  ├─ 사용자 승인 → 시험 운용 (paper) ─── 14일 경과 ──→ 실전 투입 (live)
+  │
+  └─ 거부 또는 실패 → 폐기 (killed)
+```
+
+**자동 퇴출 조건**:
+- 연속 5일 이상 손실
+- 샤프비율 0.2 미만으로 하락
+- 최대 활성 전략 수: 7개 (초과 시 최하위 전략 퇴출)
+
+### 5.4 돌연변이 (Mutation)
+
+기존 전략의 파라미터를 자동으로 변형하여 더 나은 버전을 찾습니다:
+
+- 예: `lookback_days`를 20 → 15 또는 25로 변경
+- 최대 20회 시도 후 가장 좋은 버전 선택
+- 개선된 경우에만 새 변종으로 등록
+
+### 5.5 텔레그램 명령어
+
+| 명령어 | 기능 |
+|--------|------|
+| `/status` | 현재 운영 중인 전략 상태 보고 |
+| `/research 키워드` | 해당 키워드로 새 전략 연구 시작 |
+| `/approve 이름` | 전략 승인 |
+| `/reject 이름` | 전략 거부 |
+| `/kill 이름` | 운영 중인 전략 강제 종료 |
+| `/mutate` | 돌연변이 사이클 시작 |
+
+---
+
+## 6. 실시간 매매 파이프라인
+
+### 6.1 작동 흐름
+
+```
+바이낸스 WebSocket (1분 캔들 실시간 수신)
+        │
+        ▼
+   CandleAggregator (1분 → 15분 캔들로 집계)
+        │
+        ▼
+   EnsembleAgent (9개 전략 신호 생성 + 결합)
+        │
+        ▼
+   RiskManager (포지션 크기 결정, 위험 한도 확인)
+        │
+        ▼
+   텔레그램 승인 요청 (선택사항)
+        │
+        ▼
+   BinanceAPI로 시장가 주문 실행
+        │
+        ▼
+   텔레그램으로 체결 알림
+```
+
+### 6.2 주요 매개변수
+
+| 항목 | 값 |
+|------|-----|
+| 신호 생성 주기 | 15분 |
+| 주문 방식 | 시장가(Market) |
+| 거래 수수료 | 0.04% |
+| 예상 슬리피지 | 0.05% |
+| 최대 레버리지 | 3배 |
+| 최대 낙폭 한도 | 15% |
+| 일일 손실 한도 | 3% |
+
+### 6.3 위험 관리
+
+- **포지션 한도**: 단일 코인 최대 10%, 총 20종목
+- **레버리지 제한**: 최대 3배
+- **손실 차단**: 최대 낙폭 15% 도달 시 전 포지션 청산
+- **일일 한도**: 하루 3% 이상 손실 시 신규 진입 중단
+
+---
+
+## 7. 폴더 구조 상세
+
+```
+strategy_ensemble/
+│
+├── config/                          # 설정
+│   ├── settings.py                  # 전체 시스템 설정 (전략 가중치, 거래 파라미터 등)
+│   ├── keys.yaml                    # 바이낸스/텔레그램 API 키 (비공개)
+│   └── logging_config.py            # 로그 설정
+│
+├── scripts/                         # 실행 스크립트 (진입점)
+│   ├── 1_update_data.py             # 데이터 수집 + 피처/라벨 생성
+│   ├── 2_train_ensemble.py          # 앙상블 모델 학습
+│   ├── 4_run_realtime.py            # 실시간 매매 실행
+│   └── 5_run_openclaw.py            # OpenClaw AI 연구 데몬 실행
+│
 ├── src/
-│   ├── common/           # 공통 타입 및 유틸리티
-│   ├── ingestion/        # 데이터 수집 (Bloomberg)
-│   ├── features/         # 피처 엔지니어링
-│   ├── labels/           # 라벨 생성 및 누수 방지
-│   ├── signals/          # 시그널 모델
-│   │   ├── alpha/        # 규칙 기반 알파
-│   │   └── models/       # ML/DL 모델
-│   ├── ensemble/         # 앙상블 방법론
-│   ├── portfolio/        # 포트폴리오 관리
-│   ├── backtest/         # 백테스트 엔진
-│   └── live/             # 라이브 트레이딩
-└── tests/                # 테스트 코드
+│   ├── alphas/                      # 알파 전략 모듈
+│   │   ├── base.py                  # 모든 전략의 부모 클래스 (BaseAlpha)
+│   │   ├── technical/               # 기술적 알파 (RSI, 볼린저 등)
+│   │   │   ├── rsi_reversal.py      # ⑧ RSI 반전 전략
+│   │   │   └── vol_breakout.py      # ⑨ 변동성 돌파 전략
+│   │   └── openclaw_1/              # OpenClaw 규칙 기반 알파
+│   │       ├── cs_momentum.py       # ① 횡단면 모멘텀
+│   │       ├── funding_rate_carry.py # ② 펀딩비 캐리
+│   │       ├── ts_momentum.py       # ③ 시계열 모멘텀
+│   │       ├── ts_mean_reversion.py # ④ 시계열 평균회귀
+│   │       ├── pv_divergence.py     # ⑤ 가격-거래량 괴리
+│   │       ├── volume_momentum.py   # ⑥ 거래량 모멘텀
+│   │       └── low_volatility_anomaly.py  # ⑦ 저변동성 이상현상
+│   │
+│   ├── ensemble/                    # 앙상블 엔진
+│   │   ├── agent.py                 # EnsembleAgent (전략 결합 + 포지션 배분)
+│   │   ├── allocator.py             # 포지션 배분기 (TopK, ScoreWeighted 등)
+│   │   └── score_board.py           # 전략별 성과 추적기
+│   │
+│   ├── execution/                   # 매매 실행
+│   │   ├── binance_api.py           # 바이낸스 REST API (주문, 잔고, 시세)
+│   │   ├── binance_websocket.py     # 바이낸스 WebSocket (실시간 캔들)
+│   │   ├── candle.py                # 캔들 집계기 (1분→N분 변환)
+│   │   └── telegram_bot.py          # 텔레그램 알림/승인 봇
+│   │
+│   ├── etl/                         # 데이터 가공
+│   │   ├── feature_engineer.py      # 피처 생성 (이동평균, RSI, MACD 등)
+│   │   ├── label_engineer.py        # 라벨 생성 (미래 수익률, 변동성 등)
+│   │   └── telegram_news.py         # 텔레그램 뉴스 수집
+│   │
+│   ├── pipeline/                    # 실시간 파이프라인 관리
+│   │   ├── universe.py              # 종목 유니버스 관리
+│   │   └── risk_manager.py          # 위험 관리 (포지션 사이징, 손실 한도)
+│   │
+│   ├── backtest/                    # 백테스트 엔진
+│   │   ├── engine.py                # 백테스트 실행기
+│   │   └── metrics.py               # 성과 지표 계산 (샤프, 소르티노, MDD 등)
+│   │
+│   ├── openclaw/                    # OpenClaw AI 연구 시스템
+│   │   ├── main.py                  # 메인 데몬 (전체 조율)
+│   │   ├── config.py                # OpenClaw 전용 설정
+│   │   ├── researcher/              # 아이디어 검색 + 파싱
+│   │   ├── code_generator/          # 전략 코드 자동 생성
+│   │   ├── validator/               # 백테스트 + 품질 검증
+│   │   ├── registry/                # 전략 등록/생명주기 관리
+│   │   ├── mutation/                # 파라미터 최적화
+│   │   ├── orchestrator/            # Claude 기반 가중치 최적화
+│   │   ├── execution/               # 포지션 사이징 + 리밸런싱
+│   │   └── telegram/                # 사용자 승인 인터페이스
+│   │
+│   ├── llm/                         # LLM 클라이언트
+│   │   ├── ollama_client.py         # Ollama 로컬 LLM
+│   │   └── gemini_client.py         # Google Gemini API
+│   │
+│   └── ensemble_models/             # 학습된 모델 저장/관리
+│
+├── data/processed/                  # 가공된 데이터 (Parquet)
+├── models/                          # 학습된 모델 파일
+├── logs/                            # 실행 로그
+└── finetune/                        # LLM 파인튜닝 (별도 프로젝트)
 ```
 
-## Installation
+---
+
+## 8. 실행 방법
+
+### 8.1 데이터 수집
 
 ```bash
-# Clone repository
-git clone https://github.com/your-repo/strategy_ensemble.git
-cd strategy_ensemble
+# 최근 5일치 업데이트
+python scripts/1_update_data.py
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-venv\Scripts\activate     # Windows
+# 전체 300일 데이터 새로 수집
+python scripts/1_update_data.py --full-refresh
 
-### 가상환경 설정 
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-.\.venv\Scripts\Activate.ps1
-
-# Install dependencies
-pip install -r requirements.txt
+# 피처/라벨까지 한번에 생성
+python scripts/1_update_data.py --build-features
 ```
 
-### Requirements
-
-- Python 3.10+
-- pandas >= 2.0
-- numpy >= 1.24
-- scikit-learn >= 1.3
-- torch >= 2.0 (선택)
-- blpapi (Bloomberg API, 선택)
-
-## Quick Start
-
-### 1. 더미 데이터 생성 (Bloomberg 없이 테스트)
+### 8.2 실시간 매매
 
 ```bash
-cd quant_ensemble
-python scripts/generate_dummy_data.py --n-tickers 100 --n-days 1000
+# 실시간 매매 시작 (텔레그램 승인 모드)
+python scripts/4_run_realtime.py
+
+# 드라이런 (실제 주문 없이 시뮬레이션)
+python scripts/4_run_realtime.py --dry-run
+
+# 자동 매매 (승인 없이 바로 체결)
+python scripts/4_run_realtime.py --no-approval
 ```
 
-### 2. ETL 파이프라인 실행
+### 8.3 OpenClaw 실행
 
 ```bash
-# Bloomberg 연결 시
-python scripts/run_etl.py --config config/backtest.yaml
+# AI 연구 데몬 시작 (백그라운드 지속 실행)
+python scripts/5_run_openclaw.py
 
-# 더미 데이터 사용 시
-python scripts/run_etl.py --config config/backtest.yaml --synthetic
+# 특정 주제로 연구 시작
+python scripts/5_run_openclaw.py --research "momentum alpha"
+
+# 현재 상태 확인
+python scripts/5_run_openclaw.py --status
 ```
 
-### 3. 모델 학습
+---
 
-```bash
-python scripts/train_models.py --ensemble moe --data-dir data/processed
-```
+## 9. 주요 설정값
 
-### 4. 백테스트 실행
+### 거래 파라미터 (`config/settings.py`)
 
-```bash
-python scripts/run_backtest.py --model-dir models --start-date 2023-07-01 --end-date 2024-12-31
-```
+| 항목 | 설정값 | 의미 |
+|------|--------|------|
+| `top_n_by_volume` | 50 | 거래량 상위 50개 코인만 대상 |
+| `max_position_weight` | 0.1 | 단일 코인 최대 10% |
+| `max_positions` | 20 | 최대 20개 코인 보유 |
+| `max_leverage` | 3.0 | 최대 3배 레버리지 |
+| `commission_bps` | 4.0 | 수수료 0.04% |
+| `signal_interval_minutes` | 15 | 15분마다 신호 생성 |
+| `performance_lookback` | 21 | 최근 21일 성과로 가중치 조정 |
+| `performance_blend` | 0.5 | 기본 50% + 성과 50% 혼합 |
 
-## Architecture
+### OpenClaw 품질 기준 (`src/openclaw/config.py`)
 
-### Signal Models
-
-모든 시그널 모델은 `SignalModel` 인터페이스를 구현합니다:
-
-```python
-class SignalModel(ABC):
-    @abstractmethod
-    def fit(self, features_df, labels_df, config) -> dict
-
-    @abstractmethod
-    def predict(self, date, features_df) -> pd.DataFrame
-```
-
-### Alpha Strategies
-
-| Strategy | Description | Typical Horizon |
-|----------|-------------|-----------------|
-| MomentumAlpha | 가격 모멘텀 기반 | 1-3 months |
-| MeanReversionAlpha | 평균 회귀 | 1-2 weeks |
-| QualityAlpha | 재무 품질 | 6-12 months |
-
-### Ensemble Methods
-
-| Method | Description |
-|--------|-------------|
-| **MoE (Mixture of Experts)** | 레짐별 전문가 모델 가중 |
-| **Stacking** | OOF 예측 기반 메타 모델 |
-| **Meta-Labeling** | 이진 신호 필터링 |
-
-### Anti-Leakage Mechanisms
-
-1. **Point-in-Time Features**: 해당 시점에 알 수 있는 정보만 사용
-2. **Purged K-Fold**: 학습/검증 사이 시간 간격 (purge) 적용
-3. **Embargo**: 레이블 계산 기간만큼 추가 간격
-
-## Configuration
-
-### backtest.yaml
-
-```yaml
-universe:
-  index_ticker: "KOSPI200 Index"
-  n_stocks: 100
-
-labels:
-  forward_return_days: 21
-  label_type: "return"
-
-training:
-  train_end_date: "2023-06-30"
-  n_folds: 5
-  purge_days: 21
-
-backtest:
-  start_date: "2023-07-01"
-  end_date: "2024-12-31"
-  initial_capital: 100000000
-  rebalance_frequency: "daily"
-  commission_bps: 1.5
-  tax_bps: 23.0
-
-portfolio:
-  allocation_method: "topk"
-  top_k: 20
-  max_weight: 0.1
-  max_leverage: 1.0
-
-ensemble:
-  type: "moe"
-  n_regimes: 2
-  smoothing_alpha: 0.2
-```
-
-## API Reference
-
-### BacktestEngine
-
-```python
-from backtest import BacktestEngine, BacktestConfig
-
-config = BacktestConfig(
-    start_date=pd.Timestamp("2023-07-01"),
-    end_date=pd.Timestamp("2024-12-31"),
-    initial_capital=100_000_000,
-)
-
-engine = BacktestEngine(config)
-result = engine.run(model, features_df, prices_df)
-
-# Results
-print(result.metrics)
-print(result.returns_series)
-```
-
-### MoE Ensemble
-
-```python
-from ensemble import MoEEnsemble
-from signals.models.regime_nn import RegimeClassifier
-
-# Create base models
-base_models = [momentum_alpha, reversion_alpha, quality_alpha]
-
-# Create regime model
-regime_model = RegimeClassifier({"n_regimes": 2})
-
-# Create MoE ensemble
-ensemble = MoEEnsemble(
-    base_models=base_models,
-    regime_model=regime_model,
-    config={"smoothing_alpha": 0.2},
-)
-
-# Fit and predict
-ensemble.fit(features_df, labels_df)
-predictions = ensemble.predict(date, features_df)
-```
-
-## Performance Metrics
-
-백테스트 결과에는 다음 지표가 포함됩니다:
-
-- **Returns**: Total Return, Annual Return, Monthly Returns
-- **Risk**: Volatility, Max Drawdown, VaR, CVaR
-- **Risk-Adjusted**: Sharpe Ratio, Sortino Ratio, Calmar Ratio
-- **Trading**: Win Rate, Profit Factor, Average Win/Loss
-
-## Testing
-
-```bash
-# Run all tests
-pytest tests/ -v
-
-# Run specific test file
-pytest tests/test_leakage.py -v
-
-# Run with coverage
-pytest tests/ --cov=src --cov-report=html
-```
-
-## License
-
-MIT License
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make changes with tests
-4. Submit a pull request
-
-## Contact
-
-For questions or issues, please open a GitHub issue.
+| 항목 | 기준 | 의미 |
+|------|------|------|
+| `min_sharpe` | 1.0 | 검증구간 샤프비율 1.0 이상 |
+| `max_mdd` | -0.15 | 최대낙폭 15% 이내 |
+| `max_correlation` | 0.3 | 기존 전략과 상관계수 0.3 이하 |
+| `max_daily_turnover` | 0.30 | 일일 회전율 30% 이하 |
+| `paper_trade_days` | 14 | 14일 시험 운용 후 실전 투입 |
+| `max_active_alphas` | 7 | 최대 7개 전략 동시 운영 |

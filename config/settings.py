@@ -1,7 +1,7 @@
 """
 Global Settings
 
-Trading parameters and configuration.
+Trading parameters and configuration for Binance USDT-M perpetual futures.
 """
 
 from __future__ import annotations
@@ -13,133 +13,129 @@ from pathlib import Path
 # =============================================================================
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
-RAW_DATA_DIR = DATA_DIR / "raw"
 PROCESSED_DATA_DIR = DATA_DIR / "processed"
 MODELS_DIR = PROJECT_ROOT / "models"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
-# Database
-DUCKDB_PATH = DATA_DIR / "quant.duckdb"
+# =============================================================================
+# Binance Exchange Settings
+# =============================================================================
+BINANCE = {
+    "keys_path": "config/keys.yaml",
+    "testnet": False,
+    "futures_ws_url": "wss://fstream.binance.com",
+    "rate_limit_sleep": 0.2,
+}
 
 # =============================================================================
-# Universe Settings
+# Universe Settings  (Binance USDT-M Perpetual Futures)
 # =============================================================================
 UNIVERSE = {
-    "index": "KOSPI_KOSDAQ",  # KOSPI + KOSDAQ 전종목
-    "min_market_cap": 1e11,  # 최소 시가총액 (1000억)
-    "min_volume": 1e8,  # 최소 거래대금 (1억)
-    "exclude_sectors": ["금융"],  # 제외 섹터
-    "max_stocks": 100,  # 최대 종목 수
+    "exchange": "binance_futures",
+    "quote_currency": "USDT",
+    "top_n_by_volume": 10,
+    "min_volume_usdt": 1e8,
+    "exclude_symbols": [
+        "BTCDOMUSDT", "DEFIUSDT", "BTCSTUSDT",
+        # TradFi / commodity perps (require separate agreement)
+        "XAGUSDT", "XAUUSDT",
+        # Low-liquidity / micro-cap tokens prone to min-notional issues
+        "POWERUSDT",
+    ],
 }
 
 # =============================================================================
-# Inverse ETF Mapping (숏 대응용)
-# =============================================================================
-INVERSE_MAPPING = {
-    "KOSPI": "252670",   # KODEX 200선물인버스2X
-    "KOSDAQ": "251340",  # KODEX 코스닥150선물인버스
-}
-# 시장 헤지용 인버스 ETF 티커 집합 (주문 로직에서 식별용)
-INVERSE_ETF_TICKERS = set(INVERSE_MAPPING.values())
-
-# =============================================================================
-# Trading Parameters
+# Trading Parameters  (Futures / Long-Short)
 # =============================================================================
 TRADING = {
-    # Position limits
-    "max_position_weight": 0.1,  # 최대 개별 비중 10%
-    "min_position_weight": 0.02,  # 최소 개별 비중 2%
-    "max_positions": 20,  # 최대 보유 종목 수
-    "min_trade_value": 100_000,  # 최소 거래금액 (10만원)
-
-    # Risk limits
-    "max_leverage": 1.0,  # 최대 레버리지
-    "max_drawdown": 0.15,  # 최대 손실 허용 (15%)
-    "daily_loss_limit": 0.03,  # 일일 손실 한도 (3%)
-
-    # Execution
-    "order_type": "limit",  # limit or market
-    "slippage_bps": 10,  # 슬리피지 가정 (10bps)
-
-    # Transaction costs (Korean market)
-    "commission_bps": 1.5,  # 수수료 (0.015%)
-    "tax_bps": 23.0,  # 거래세 (0.23%, 매도시)
+    "max_position_weight": 0.30,
+    "min_position_weight": 0.05,
+    "max_positions": 3,
+    "min_notional_usdt": 5,
+    "max_leverage": 3.0,
+    "max_drawdown": 0.15,
+    "daily_loss_limit": 0.03,
+    "order_type": "market",
+    "slippage_bps": 5,
+    "commission_bps": 4.0,
+    "funding_cost_per_8h": True,
 }
 
 # =============================================================================
 # Strategy Settings
 # =============================================================================
 STRATEGIES = {
+    # --- OpenClaw Alphas (Active) ---
+    # Weights sum to 1.0 across all enabled strategies
+    "cs_momentum": {
+        "enabled": True,
+        "weight": 0.15,
+        "lookback_days": 60,
+        "skip_days": 5,
+    },
+    "ts_momentum": {
+        "enabled": True,
+        "weight": 0.12,
+        "lookback_days": 20,
+    },
+    "ts_mean_reversion": {
+        "enabled": True,
+        "weight": 0.08,
+        "signal_window": 5,
+        "baseline_window": 60,
+    },
+    "pv_divergence": {
+        "enabled": True,
+        "weight": 0.08,
+        "lookback_days": 20,
+    },
+    "volume_momentum": {
+        "enabled": True,
+        "weight": 0.07,
+        "lookback_days": 20,
+    },
+    "low_volatility_anomaly": {
+        "enabled": True,
+        "weight": 0.07,
+        "lookback_days": 20,
+    },
+    "funding_rate_carry": {
+        "enabled": True,
+        "weight": 0.20,
+        "lookback_days": 7,
+    },
     "rsi_reversal": {
         "enabled": True,
-        "weight": 0.25,
+        "weight": 0.12,
         "rsi_period": 14,
         "oversold": 30,
         "overbought": 70,
     },
     "vol_breakout": {
         "enabled": True,
-        "weight": 0.25,
+        "weight": 0.11,
         "lookback": 20,
         "breakout_threshold": 1.5,
     },
-    "value_f_score": {
-        "enabled": True,
-        "weight": 0.25,
-        "min_f_score": 5,
-        "max_pb_ratio": 3.0,
-    },
-    "sentiment_long": {
-        "enabled": True,
-        "weight": 0.25,
-        "momentum_lookback": 60,
-    },
-    # --- ML Alphas ---
-    "return_prediction": {
-        "enabled": True,
-        "weight": 0.2,
-        "type": "ml",
-        "n_estimators": 500,
-        "max_depth": 6,
-        "learning_rate": 0.05,
-    },
-    "intraday_pattern": {
-        "enabled": True,
-        "weight": 0.15,
-        "type": "ml",
-        "n_estimators": 400,
-        "max_depth": 5,
-        "learning_rate": 0.05,
-    },
-    "volatility_forecast": {
-        "enabled": True,
-        "weight": 0.1,
-        "type": "ml",
-        "n_estimators": 500,
-        "max_depth": 5,
-        "learning_rate": 0.05,
-    },
-    # --- LLM Alpha (순차 파이프라인에서 최종 판단 역할) ---
-    "llm_alpha": {
-        "enabled": True,
-        "type": "llm",
-        "model": "qwen2.5-kospi-ft-s3",
-        "temperature": 0.3,
-        "max_stocks_in_prompt": 50,
-    },
+    "value_f_score": {"enabled": False, "weight": 0.0},
+    "sentiment_long": {"enabled": False, "weight": 0.0},
+    "return_prediction": {"enabled": False, "weight": 0.0, "type": "ml"},
+    "intraday_pattern": {"enabled": False, "weight": 0.0, "type": "ml"},
+    "volatility_forecast": {"enabled": False, "weight": 0.0, "type": "ml"},
+    "llm_alpha": {"enabled": False, "type": "llm"},
 }
 
 # =============================================================================
 # Regime Classifier Settings
 # =============================================================================
 REGIME_CLASSIFIER = {
-    "enabled": True,
+    "enabled": False,
     "n_estimators": 300,
     "max_depth": 8,
     "min_samples_leaf": 20,
-    "regime_horizon": 20,       # 레짐 판단 기간 (20 거래일)
-    "bull_threshold": 0.03,     # 이 이상이면 상승장
-    "bear_threshold": -0.03,    # 이 이하이면 하락장
+    "regime_horizon": 20,
+    "bull_threshold": 0.03,
+    "bear_threshold": -0.03,
 }
 
 # =============================================================================
@@ -147,39 +143,29 @@ REGIME_CLASSIFIER = {
 # =============================================================================
 ENSEMBLE = {
     "use_dynamic_weights": True,
-    "performance_lookback": 21,  # 가중치 계산 기간
-    "performance_blend": 0.5,  # 성과 기반 가중치 비율
-
-    # LLM orchestrator (순차 파이프라인에서 Gemini가 담당)
-    "use_llm_orchestrator": True,
-    "llm_model": "gemini-3-flash",
-    "llm_temperature": 0.3,
-    "llm_timeout": 60.0,
-
-    # Regime preferences
+    "performance_lookback": 21,
+    "performance_blend": 0.5,
+    "use_llm_orchestrator": False,
     "regime_preferences": {
         "bull": {
-            "vol_breakout": 1.5,
-            "sentiment_long": 1.3,
-            "rsi_reversal": 0.7,
-            "return_prediction": 1.3,
-            "intraday_pattern": 1.0,
-            "llm_alpha": 1.0,
+            "cs_momentum": 1.5,
+            "ts_momentum": 1.4,
+            "vol_breakout": 1.3,
+            "funding_rate_carry": 1.2,
+            "ts_mean_reversion": 0.6,
         },
         "bear": {
-            "rsi_reversal": 1.3,
-            "value_f_score": 1.2,
-            "vol_breakout": 0.5,
-            "return_prediction": 0.8,
-            "volatility_forecast": 1.5,
-            "llm_alpha": 1.0,
+            "ts_mean_reversion": 1.5,
+            "funding_rate_carry": 1.4,
+            "low_volatility_anomaly": 1.3,
+            "cs_momentum": 0.6,
+            "ts_momentum": 0.5,
         },
         "sideways": {
-            "rsi_reversal": 1.5,
-            "value_f_score": 1.0,
-            "intraday_pattern": 1.3,
-            "return_prediction": 1.0,
-            "llm_alpha": 1.2,
+            "ts_mean_reversion": 1.3,
+            "pv_divergence": 1.2,
+            "funding_rate_carry": 1.1,
+            "cs_momentum": 0.8,
         },
     },
 }
@@ -188,95 +174,86 @@ ENSEMBLE = {
 # Backtest Settings
 # =============================================================================
 BACKTEST = {
-    "start_date": "2020-01-01",
-    "end_date": "2024-12-31",
-    "initial_capital": 100_000_000,  # 1억원
+    "start_date": "2022-01-01",
+    "end_date": "2025-12-31",
+    "initial_capital": 10_000,
     "rebalance_frequency": "daily",
-    "benchmark": "KOSPI",
+    "benchmark": "BTC/USDT:USDT",
 }
 
 # =============================================================================
 # Schedule Settings
 # =============================================================================
 SCHEDULE = {
-    "market_open": "09:00",
-    "market_close": "15:30",
-    "data_update": "08:30",  # 장 시작 전 데이터 업데이트
-    "signal_generation": "09:00",  # 장 시작 시 신호 생성
-    "rebalance_time": "09:10",  # 리밸런싱 실행
-    "eod_report": "15:35",  # 장 마감 후 리포트
+    "market_open": "00:00",
+    "market_close": "23:59",
+    "data_update": "00:05",
+    "signal_generation": "00:10",
+    "rebalance_time": "00:15",
+    "eod_report": "00:00",
 }
 
 # =============================================================================
-# LLM Settings (Gemini + Ollama 병행)
-# =============================================================================
-LLM_CONFIG = {
-    # Gemini (앙상블 오케스트레이션, 시장 분석)
-    "gemini_model": "gemini-3-flash",
-    "gemini_temperature": 0.3,
-    "gemini_timeout": 60.0,
-    # Ollama (파인튜닝 모델 - 전략 특화 시그널 생성)
-    "ollama_url": "http://localhost:11434",
-    "ollama_model": "qwen2.5-kospi-ft-s3",
-    "ollama_temperature": 0.3,
-    "ollama_timeout": 120.0,
-    # 공통
-    "max_retries": 2,
-    "retry_delay": 5.0,
-    "max_stocks_in_prompt": 50,
-    "reasoning_log_dir": str(LOGS_DIR / "reasoning"),
-}
-
-# =============================================================================
-# WebSocket Settings (KIS Real-time)
+# WebSocket Settings (Binance Real-time)
 # =============================================================================
 WEBSOCKET_CONFIG = {
-    "candle_interval_minutes": 1,   # 1분봉 수집 (데이터 해상도)
-    "signal_interval_minutes": 15,  # 15분마다 시그널 생성 (LLM 호출 주기)
+    "candle_interval": "1m",
+    "signal_interval_minutes": 5,
     "auto_reconnect": True,
     "reconnect_delay": 5.0,
     "max_reconnect_attempts": 10,
-    "heartbeat_interval": 30,
-    "min_ticks_for_signal": 10,     # 최소 틱 수 미달 시 시그널 생성 건너뜀
+    "heartbeat_interval": 20,
+    "min_ticks_for_signal": 10,
 }
 
 # =============================================================================
-# Pipeline Settings (순차 파이프라인 구조)
+# Pipeline Settings
 # =============================================================================
 PIPELINE = {
-    # Step 1: Universe filter
-    "min_market_cap": 1e11,
-    # Step 2: ML feature extraction (기존 ML 알파를 데이터 소스로 사용)
-    "ml_strategies": [
-        "return_prediction",
-        "volatility_forecast",
-        "intraday_pattern",
-    ],
-    # ML score aggregation tuning (Step 2 핵심 편집 포인트)
-    # - 가중합: 전략별 상대 중요도 조절
-    # - tanh 정규화: 모델별 스코어 스케일 차이 완화
-    "ml_score_weights": {
-        "return_prediction": 0.50,
-        "intraday_pattern": 0.30,
-        "volatility_forecast": 0.20,
-    },
-    "ml_score_normalization": "tanh",  # tanh | clip | none
-    "ml_score_temperature": 1.0,
-    # Step 3: Technical + fundamental 소스
-    "technical_strategies": [
+    "top_n_symbols": 50,
+    "active_strategies": [
+        "cs_momentum",
+        "ts_momentum",
+        "ts_mean_reversion",
+        "pv_divergence",
+        "volume_momentum",
+        "low_volatility_anomaly",
+        "funding_rate_carry",
         "rsi_reversal",
         "vol_breakout",
-        "value_f_score",
-        "sentiment_long",
     ],
-    # Step 4: LLM reasoning (최종 판단)
-    "llm_model": "qwen2.5-kospi-ft-s3",
-    # Step 5: Risk management
-    "max_position_weight": 0.1,
-    "max_positions": 20,
-    # Step 6: Approval
+    # Use TRADING values for consistency (override only for backtest if needed)
+    "max_position_weight": TRADING["max_position_weight"],
+    "max_positions": TRADING["max_positions"],
     "require_human_approval": True,
-    "approval_timeout_seconds": 300,  # 5분 대기
+    "approval_timeout_seconds": 300,
+}
+
+# =============================================================================
+# Daemon Settings (Unified: OpenClaw + Trading)
+# =============================================================================
+DAEMON = {
+    "rebalance_interval_minutes": 5,
+    "auto_research_interval_hours": 24,
+    "trade_approval_timeout_seconds": 300,
+    "max_proposal_positions": 10,
+}
+
+# =============================================================================
+# Sonnet Decision Maker Settings
+# =============================================================================
+SONNET_DECISION = {
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "default_stop_loss_pct": -0.05,
+    "default_take_profit_pct": 0.10,
+    # SL bounds: tightest = closest to entry, loosest = farthest from entry
+    "tightest_stop_loss_pct": -0.02,   # -2% (closest allowed SL)
+    "loosest_stop_loss_pct": -0.08,    # -8% (farthest allowed SL)
+    # TP bounds: smallest = minimum profit target, largest = max target
+    "smallest_take_profit_pct": 0.03,  # +3% minimum TP
+    "largest_take_profit_pct": 0.15,   # +15% maximum TP
+    "sltp_check_interval_seconds": 5,
 }
 
 # =============================================================================
