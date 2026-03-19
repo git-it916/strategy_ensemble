@@ -36,9 +36,12 @@ from config.settings import (
     DAILY_REFRESH_INTERVAL_SEC,
     LEVERAGE,
     LOGS_DIR,
+    LONG_ENTRY_THRESHOLD,
     ORDERBOOK_INTERVAL_SEC,
     REBALANCE_INTERVAL_SEC,
+    SHORT_ENTRY_THRESHOLD,
     UNIVERSE_REFRESH_INTERVAL_SEC,
+    VOL_FILTER_BASELINE_BARS,
 )
 
 logging.basicConfig(
@@ -168,6 +171,9 @@ async def main_loop(dry_run: bool = False):
                 await asyncio.sleep(30)
         asyncio.create_task(time_sync_task())
 
+    # --- 진입 시점 알파 저장용 ---
+    _entry_alphas_cache: dict = {}  # {symbol: {alpha_name: score}}
+
     # --- 타이머 ---
     last_daily = time.time()
     last_universe = time.time()
@@ -245,7 +251,8 @@ async def main_loop(dry_run: bool = False):
                         coin_1h_rets[sym] = float(closes[-1] / closes[-12] - 1)
                     if len(volumes) >= 12:
                         recent_vol = float(volumes[-6:].mean())
-                        baseline_vol = float(volumes.mean())
+                        baseline_window = min(len(volumes), VOL_FILTER_BASELINE_BARS)
+                        baseline_vol = float(volumes[-baseline_window:].mean())
                         coin_vol_ratios[sym] = recent_vol / baseline_vol if baseline_vol > 0 else 1.0
 
             market_data["coin_1h_rets"] = coin_1h_rets
@@ -277,6 +284,10 @@ async def main_loop(dry_run: bool = False):
                             a.name: signals.get(order.symbol, {}).get(a.name, AlphaSignal()).score
                             for a in alphas
                         }
+                        # 진입 시점 알파 캐시 (거래 로그에 entry_alphas로 기록)
+                        _entry_alphas_cache[order.symbol] = {
+                            a.name: round(contribs[a.name], 4) for a in alphas
+                        }
                         telegram.send_entry(
                             coin=order.symbol,
                             direction=order.direction,
@@ -298,6 +309,8 @@ async def main_loop(dry_run: bool = False):
                     closing_entry_price = store.current.entry_price
                     closing_entry_time = store.current.entry_time
                     closing_entry_score = store.current.entry_score
+                    closing_peak_pnl = store.current.peak_pnl
+                    closing_trailing = store.current.trailing_active
 
                     # 청산 실행
                     close_success = False
@@ -349,7 +362,15 @@ async def main_loop(dry_run: bool = False):
                             sig = signals.get(closing_symbol, {}).get(a.name)
                             if sig:
                                 alpha_at_exit[a.name] = round(sig.score, 4)
-                        PositionStore._append_trade_log({
+                        # trajectory: 보유 중 궤적 요약
+                        trough_pnl = min(0.0, pnl_pct)  # 최저는 현재 pnl 또는 0
+                        trajectory = {
+                            "peak_pnl_pct": round(closing_peak_pnl * 100, 2),
+                            "trough_pnl_pct": round(trough_pnl * 100, 2),
+                            "trailing_activated": closing_trailing,
+                        }
+
+                        trade_entry = {
                             "symbol": closing_symbol,
                             "direction": closing_direction,
                             "entry_price": closing_entry_price,
@@ -364,7 +385,13 @@ async def main_loop(dry_run: bool = False):
                             "exit_score": round(exit_score, 4),
                             "exit_alphas": alpha_at_exit,
                             "balance": round(fresh_balance, 2),
-                        })
+                            "trajectory": trajectory,
+                        }
+                        # entry_alphas 추가 (캐시에서 가져오기)
+                        cached = _entry_alphas_cache.pop(closing_symbol, None)
+                        if cached:
+                            trade_entry["entry_alphas"] = cached
+                        PositionStore._append_trade_log(trade_entry)
 
                         # SWITCH: 청산 성공 확인 후에만 새 코인 진입
                         if order.reason == "SWITCH":
@@ -680,6 +707,39 @@ def _log_signals(now, scores, signals, bundle=None, store=None, drawdown=None,
         decision["direction"] = order.direction
         decision["reason"] = order.reason
 
+    # ── 추가: near_threshold (임계값 70~100% 구간 — 놓친 기회 분석용) ──
+    near_threshold = {}
+    for sym, sc in scores.items():
+        if LONG_ENTRY_THRESHOLD * 0.7 <= sc < LONG_ENTRY_THRESHOLD:
+            near_threshold[sym] = {"score": round(sc, 4), "direction": "LONG",
+                                   "gap": round(LONG_ENTRY_THRESHOLD - sc, 4)}
+        elif SHORT_ENTRY_THRESHOLD < sc <= SHORT_ENTRY_THRESHOLD * 0.7:
+            near_threshold[sym] = {"score": round(sc, 4), "direction": "SHORT",
+                                   "gap": round(sc - SHORT_ENTRY_THRESHOLD, 4)}
+
+    # ── 추가: data_quality (confidence=0 알파 감지) ──
+    from config.settings import ALPHA_WEIGHTS as _AW
+    active_names = {k for k, v in _AW.items() if v > 0}
+    zero_conf_alphas = set()
+    sample_sym = next(iter(signals), None)
+    if sample_sym:
+        for aname, sig in signals[sample_sym].items():
+            if aname in active_names and sig.confidence <= 0:
+                zero_conf_alphas.add(aname)
+    data_quality = {
+        "zero_confidence_count": len(zero_conf_alphas),
+        "active_alpha_count": len(active_names),
+    }
+    if zero_conf_alphas:
+        data_quality["missing_alphas"] = sorted(zero_conf_alphas)
+
+    # ── 추가: entry_alphas (OPEN 시에만 — 진입 판단 근거) ──
+    entry_alphas = None
+    if order and order.action == "OPEN":
+        target_sym = order.symbol
+        if target_sym in alphas_data:
+            entry_alphas = {target_sym: alphas_data[target_sym]}
+
     # 조립
     entry = {
         "t": now.isoformat(),
@@ -705,6 +765,11 @@ def _log_signals(now, scores, signals, bundle=None, store=None, drawdown=None,
         entry["spreads"] = spreads
     if coin_returns:
         entry["returns"] = coin_returns
+    if near_threshold:
+        entry["near_threshold"] = near_threshold
+    entry["data_quality"] = data_quality
+    if entry_alphas:
+        entry["entry_alphas"] = entry_alphas
 
     with open(path, "a") as f:
         f.write(json.dumps(entry, separators=(",", ":")) + "\n")

@@ -3,19 +3,49 @@ SLTPMonitor — CLAUDE.md 섹션 7 기준.
 
 5초마다 실행. 하드 SL → 트레일링 스탑 → 하드 TP 순서로 체크.
 청산 시 거래 기록 + 텔레그램 알림 발송.
+궤적 로그: logs/sltp/YYYY-MM-DD.jsonl (peak 갱신/이벤트 시 기록)
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from config.settings import TRAILING_ACTIVATION_PCT, TRAILING_DISTANCE_PCT
+from config.settings import LOGS_DIR, TRAILING_ACTIVATION_PCT, TRAILING_DISTANCE_PCT
 from src.engine.decision_engine import Position
 
 logger = logging.getLogger(__name__)
+
+# 궤적 로그 heartbeat 간격 (초)
+_SLTP_LOG_HEARTBEAT_SEC = 60
+
+
+def _log_sltp_event(pos: Position, price: float, pnl_pct: float, event: str) -> None:
+    """SL/TP 궤적을 logs/sltp/YYYY-MM-DD.jsonl에 기록."""
+    try:
+        sdir = LOGS_DIR / "sltp"
+        sdir.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        path = sdir / f"{now.strftime('%Y-%m-%d')}.jsonl"
+        entry = {
+            "t": now.isoformat(),
+            "symbol": pos.symbol,
+            "event": event,
+            "price": round(price, 4),
+            "pnl_pct": round(pnl_pct * 100, 2),
+            "peak_pnl_pct": round(pos.peak_pnl * 100, 2),
+            "sl_price": round(pos.sl_price, 4),
+            "tp_price": round(pos.tp_price, 4),
+            "sl_distance_pct": round(abs(price - pos.sl_price) / price * 100, 2) if price > 0 else 0,
+            "trailing_active": pos.trailing_active,
+        }
+        with open(path, "a") as f:
+            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    except Exception:
+        pass  # 로깅 실패가 매매를 막아선 안 됨
 
 
 class SLTPMonitor:
@@ -23,6 +53,7 @@ class SLTPMonitor:
 
     def __init__(self):
         self._closing = False  # 레이스 컨디션 방지 플래그
+        self._last_sltp_log_time: float = 0  # heartbeat용 타임스탬프
 
     async def run_loop(self, executor, telegram, get_position, get_price, store=None, engine=None, drawdown=None):
         """
@@ -52,7 +83,21 @@ class SLTPMonitor:
                         if store and (pos.peak_pnl != old_peak or pos.trailing_active != old_trailing):
                             store._save()
 
+                        # 궤적 로그: peak 갱신 or 트레일링 활성화 or heartbeat
+                        import time as _time
+                        now_mono = _time.monotonic()
+                        if pos.peak_pnl != old_peak:
+                            _log_sltp_event(pos, price, pnl_pct, "UPDATE")
+                            self._last_sltp_log_time = now_mono
+                        elif pos.trailing_active and not old_trailing:
+                            _log_sltp_event(pos, price, pnl_pct, "TRAILING_ACTIVATED")
+                            self._last_sltp_log_time = now_mono
+                        elif now_mono - self._last_sltp_log_time >= _SLTP_LOG_HEARTBEAT_SEC:
+                            _log_sltp_event(pos, price, pnl_pct, "HEARTBEAT")
+                            self._last_sltp_log_time = now_mono
+
                         if reason:
+                            _log_sltp_event(pos, price, pnl_pct, reason)
                             self._closing = True  # 메인 루프와 동시 청산 방지
                             try:
                                 logger.info(
@@ -92,7 +137,7 @@ class SLTPMonitor:
                                 # 거래 기록
                                 if store:
                                     from src.engine.position_store import PositionStore
-                                    PositionStore._append_trade_log({
+                                    trade_entry = {
                                         "symbol": closing_symbol,
                                         "direction": closing_direction,
                                         "entry_price": closing_entry_price,
@@ -101,7 +146,13 @@ class SLTPMonitor:
                                         "exit_time": now_utc.isoformat(),
                                         "reason": reason,
                                         "pnl_pct": round(pnl_pct * 100, 2),
-                                    })
+                                        "trajectory": {
+                                            "peak_pnl_pct": round(pos.peak_pnl * 100, 2),
+                                            "trough_pnl_pct": round(min(0.0, pnl_pct) * 100, 2),
+                                            "trailing_activated": pos.trailing_active,
+                                        },
+                                    }
+                                    PositionStore._append_trade_log(trade_entry)
                                     store._position = None
                                     store._save()
 

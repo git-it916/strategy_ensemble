@@ -51,20 +51,30 @@ class MomentumComposite(BaseAlphaV2):
         else:
             rank_score = 0.0
 
-        # 3. 위험 조정 모멘텀
-        risk_adj = float(np.tanh(ret_20d / vol_20d * 0.5))
+        # 3. 단기 모멘텀 (5일) — abs_mom(20일)과 독립적인 시간대
+        if len(closes) >= 6 and closes[-6] != 0:
+            ret_5d = (closes[-1] / closes[-6]) - 1
+            short_rets = np.diff(closes[-6:]) / closes[-6:-1]
+            vol_5d = float(np.std(short_rets, ddof=1)) if len(short_rets) > 1 else vol_20d
+            vol_5d = max(vol_5d, 0.001)
+            mom_5d = float(np.tanh(ret_5d / vol_5d))
+        else:
+            mom_5d = 0.0
 
         # 4. 합산 (×0.5 스케일 정규화 — 다른 알파와 magnitude 맞춤)
-        score = (0.4 * abs_mom + 0.3 * rank_score + 0.3 * risk_adj) * 0.5
+        score = (0.4 * abs_mom + 0.3 * rank_score + 0.3 * mom_5d) * 0.5
         score = float(np.clip(score, -1.0, 1.0))
 
         # confidence: 일봉 기반(4h 갱신) → 기본 낮게, 구성요소 합의시 올림
         confidence = 0.35
-        if np.sign(abs_mom) == np.sign(rank_score) == np.sign(risk_adj):
+        if np.sign(abs_mom) == np.sign(rank_score) == np.sign(mom_5d):
             confidence = 0.50  # 3요소 방향 일치
+        # 20일과 5일 방향이 다르면 추세 전환 가능성 → 낮게
+        if np.sign(abs_mom) != np.sign(mom_5d) and abs(mom_5d) > 0.3:
+            confidence = 0.25
 
         return AlphaSignal(
             score=score,
             confidence=confidence,
-            metadata={"abs_mom": abs_mom, "rank_score": rank_score, "risk_adj": risk_adj},
+            metadata={"abs_mom": abs_mom, "rank_score": rank_score, "mom_5d": mom_5d},
         )

@@ -33,15 +33,26 @@ class IntradayRSIV2(BaseAlphaV2):
         if rsi is None:
             return AlphaSignal()
 
-        # 시그널
+        # 시그널 — 극단 구간에서만 발동, 중립 구간은 시그널 없음
         if rsi > 70:
-            score = -(rsi - 70) / 30  # 최대 -1.0
+            score = -(rsi - 70) / 30  # 70→0, 100→-1.0
         elif rsi < 30:
-            score = (30 - rsi) / 30   # 최대 +1.0
+            score = (30 - rsi) / 30   # 30→0, 0→+1.0
+        elif rsi > 60:
+            # 60~70: 약한 과매수 경고 (선형 진입)
+            score = -(rsi - 60) / 50  # 60→0, 70→-0.2
+        elif rsi < 40:
+            # 30~40: 약한 과매도 경고 (선형 진입)
+            score = (40 - rsi) / 50   # 40→0, 30→+0.2
         else:
-            score = (50 - rsi) / 100  # 약한 시그널
+            # 40~60: 중립 → 시그널 없음
+            score = 0.0
 
-        confidence = min(abs(score) * 1.5, 1.0)
+        # confidence: 극단일수록 높게, 중립이면 0
+        if abs(score) < 0.01:
+            confidence = 0.0
+        else:
+            confidence = min(abs(score) * 1.5, 1.0)
 
         return AlphaSignal(
             score=float(score),

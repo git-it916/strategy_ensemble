@@ -32,20 +32,22 @@ class FundingCarryEnhanced(BaseAlphaV2):
         avg_funding = float(np.mean(rates[-42:])) if len(rates) >= 42 else float(np.mean(rates))
 
         # 2. 기본 점수: 펀딩 음수 → 롱 유리
-        scaling = 5000  # 0.01% funding → score ≈ 0.5
-        base_score = -avg_funding * scaling
-        base_score = float(np.clip(base_score, -1.0, 1.0))
+        # tanh로 부드러운 포화 — avg_funding=±0.0003에서 ±0.71, ±0.0005에서 ±0.88
+        base_score = float(np.tanh(-avg_funding * 2500))
 
         # confidence: 펀딩은 8h마다 변동, 일봉 4h 갱신 → 기본 낮게
         confidence = 0.5
 
-        # 3. 펀딩 속도
+        # 3. 펀딩 속도 — 포화 전에 적용해서 실제 효과 발생
+        velocity_bonus = 0.0
         if len(rates) >= 42:
             recent_7d = float(np.mean(rates[-21:]))
             prev_7d = float(np.mean(rates[-42:-21]))
             velocity = recent_7d - prev_7d
             if np.sign(velocity) == np.sign(-avg_funding):
-                base_score *= 1.15  # 같은 방향 강화
+                # 가속 중이면 보너스 (최대 ±0.15)
+                velocity_bonus = float(np.tanh(abs(velocity) * 10000)) * 0.15 * np.sign(base_score)
+        base_score = float(np.clip(base_score + velocity_bonus, -1.0, 1.0))
 
         # 4. 군중 할인
         if data.has_oi(symbol):

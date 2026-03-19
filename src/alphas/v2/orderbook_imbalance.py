@@ -44,24 +44,31 @@ class OrderbookImbalance(BaseAlphaV2):
 
         raw = 0.5 * imb_near + 0.3 * imb_mid + 0.2 * imb_far
 
-        # 2. 30분 이동평균 (스냅샷 히스토리)
+        # 2. 히스토리 지수 가중 평균 (최신에 높은 가중)
         if len(snapshots) >= 3:
-            history_raws = []
-            for snap in snapshots:
+            # 최근 5개만 사용 (5분 히스토리), 지수 가중
+            recent_snaps = snapshots[-5:]
+            ema_raw = None
+            decay = 0.6  # 이전 값 40% 유지
+            for snap in recent_snaps:
                 if snap.bids and snap.asks:
                     n = self._bucket_imbalance(snap.bids, snap.asks, 0, 5)
                     m = self._bucket_imbalance(snap.bids, snap.asks, 5, 10)
                     f = self._bucket_imbalance(snap.bids, snap.asks, 10, 20)
-                    history_raws.append(0.5 * n + 0.3 * m + 0.2 * f)
-            if history_raws:
-                raw = float(np.mean(history_raws))
+                    snap_raw = 0.5 * n + 0.3 * m + 0.2 * f
+                    if ema_raw is None:
+                        ema_raw = snap_raw
+                    else:
+                        ema_raw = (1 - decay) * ema_raw + decay * snap_raw
+            if ema_raw is not None:
+                raw = ema_raw
 
-        # 3. score
+        # 3. score — EMA 스무딩은 히스토리에서 이미 처리, 이중 스무딩 제거
         score = float(np.tanh(raw * 3))
 
-        # 알파 내부 EMA — 오더북 미세변동 감쇠
+        # 심볼별 EMA — 사이클 간 급변동만 감쇠 (가벼운 스무딩)
         prev = self._prev_scores.get(symbol, score)
-        smoothed = self._EMA_ALPHA * score + (1 - self._EMA_ALPHA) * prev
+        smoothed = 0.7 * score + 0.3 * prev  # 새 값 70%, 이전 30%
         self._prev_scores[symbol] = smoothed
 
         # confidence: 불균형 크기에 비례 (노이즈 많은 데이터 → 강한 신호만 신뢰)

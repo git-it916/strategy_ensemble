@@ -17,7 +17,7 @@ class MomentumMultiScale(BaseAlphaV2):
             name="MomentumMultiScale",
             weight=0.22,
             category="momentum",
-            required_data=["ohlcv_5m"],
+            required_data=["ohlcv_5m", "ohlcv_1d"],
         )
         self._prev_scores: dict[str, float] = {}  # 심볼별 EMA 상태
 
@@ -39,14 +39,14 @@ class MomentumMultiScale(BaseAlphaV2):
 
         weighted_return = 0.4 * ret_30m + 0.35 * ret_90m + 0.25 * ret_180m
 
-        # 2. 변동성 정규화 (5분봉 288개 = 1일, 근사로 ::288 사용)
-        bars_per_day = 288  # 24h × 60min / 5min
-        daily_closes = closes[::bars_per_day] if len(closes) > bars_per_day * 2 else closes[::48]  # 48봉=4시간 폴백
-        if len(daily_closes) > 2:
-            rets = np.diff(daily_closes) / daily_closes[:-1]
-            vol_5d = float(np.std(rets, ddof=1)) if len(rets) > 1 else 0.03
-        else:
-            vol_5d = 0.03
+        # 2. 변동성 정규화 — 일봉 데이터에서 직접 가져옴 (안정적)
+        vol_5d = 0.03  # 기본값
+        if data.has_ohlcv_1d(symbol):
+            ddf = data.ohlcv_1d[symbol]
+            if len(ddf) >= 6:
+                daily_closes = ddf["close"].values[-6:]
+                daily_rets = np.diff(daily_closes) / daily_closes[:-1]
+                vol_5d = float(np.std(daily_rets, ddof=1)) if len(daily_rets) > 1 else 0.03
         vol_5d = max(vol_5d, 0.001)
 
         score = float(np.tanh(weighted_return / vol_5d)) * 0.5  # 스케일 정규화

@@ -7,9 +7,11 @@ DecisionEngine — CLAUDE.md 섹션 6 기준.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, Optional
 
 from config.settings import (
@@ -19,6 +21,7 @@ from config.settings import (
     ENTRY_REQUIRE_RISING,
     FADE_DURATION_MIN,
     FADE_THRESHOLD,
+    LOGS_DIR,
     LONG_ENTRY_THRESHOLD,
     LONG_SL_PCT,
     LONG_TP_PCT,
@@ -33,11 +36,36 @@ from config.settings import (
     SWITCH_MIN_HOLD_MINUTES,
     SWITCH_REVERSE_SCORE_DROP,
     SWITCH_SAME_DIR_GAP,
+    VOL_FILTER_THRESHOLD,
     WEAK_DURATION_MIN,
     WEAK_THRESHOLD,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _log_filter(symbol: str, direction: str, score: float,
+                filter_name: str, detail: str, price: float = 0) -> None:
+    """필터 차단 로그를 logs/filters/YYYY-MM-DD.jsonl에 기록."""
+    try:
+        fdir = LOGS_DIR / "filters"
+        fdir.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        path = fdir / f"{now.strftime('%Y-%m-%d')}.jsonl"
+        entry = {
+            "t": now.isoformat(),
+            "symbol": symbol,
+            "direction": direction,
+            "score": round(score, 4),
+            "filter": filter_name,
+            "detail": detail,
+        }
+        if price > 0:
+            entry["price"] = round(price, 4)
+        with open(path, "a") as f:
+            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    except Exception:
+        pass  # 로깅 실패가 매매를 막아선 안 됨
 
 
 @dataclass
@@ -140,23 +168,28 @@ class DecisionEngine:
             coin_1h = coin_1h_rets.get(sym, 0)
             if direction == "LONG" and coin_1h > 0.03:
                 logger.info(f"FILTER: {sym.split('/')[0]} LONG blocked — already +{coin_1h:.1%} in 1h")
+                _log_filter(sym, direction, sc, "OVERHEAT", f"1h_ret={coin_1h:+.1%}")
                 continue
             if direction == "SHORT" and coin_1h < -0.03:
                 logger.info(f"FILTER: {sym.split('/')[0]} SHORT blocked — already {coin_1h:.1%} in 1h")
+                _log_filter(sym, direction, sc, "OVERHEAT", f"1h_ret={coin_1h:+.1%}")
                 continue
 
             # 필터 2: BTC 방향 확인 — BTC 역방향 진입 차단
             if direction == "LONG" and btc_1h_ret < -0.01:
                 logger.info(f"FILTER: {sym.split('/')[0]} LONG blocked — BTC dropping {btc_1h_ret:.1%}")
+                _log_filter(sym, direction, sc, "BTC_DIRECTION", f"btc_1h={btc_1h_ret:+.1%}")
                 continue
             if direction == "SHORT" and btc_1h_ret > 0.01:
                 logger.info(f"FILTER: {sym.split('/')[0]} SHORT blocked — BTC rising {btc_1h_ret:.1%}")
+                _log_filter(sym, direction, sc, "BTC_DIRECTION", f"btc_1h={btc_1h_ret:+.1%}")
                 continue
 
             # 필터 3: 거래량 확인 — 거래량 없는 움직임 제외
             vol_ratio = coin_vol_ratios.get(sym, 1.0)
-            if vol_ratio < 0.7:
+            if vol_ratio < VOL_FILTER_THRESHOLD:
                 logger.info(f"FILTER: {sym.split('/')[0]} blocked — low volume ({vol_ratio:.1f}x)")
+                _log_filter(sym, direction, sc, "LOW_VOLUME", f"vol_ratio={vol_ratio:.2f}")
                 continue
 
             filtered.append((sym, sc, direction))
@@ -176,7 +209,9 @@ class DecisionEngine:
             and self._last_exit_symbol == symbol
             and (now - self._last_exit_time) < timedelta(minutes=COOLDOWN_MINUTES)
         ):
+            remaining_sec = (self._last_exit_time + timedelta(minutes=COOLDOWN_MINUTES) - now).total_seconds()
             logger.info(f"Cooldown active for {symbol}, skipping")
+            _log_filter(symbol, direction, score, "COOLDOWN", f"remaining={remaining_sec/60:.0f}min")
             remaining = [c for c in all_candidates if c[0] != symbol]
             if remaining:
                 best = max(remaining, key=lambda x: abs(x[1]))
@@ -190,6 +225,7 @@ class DecisionEngine:
             latest_loss = ban_times[-1]
             if (now - latest_loss) < timedelta(hours=SAME_SYMBOL_BAN_HOURS):
                 logger.info(f"BANNED: {symbol.split('/')[0]} — {len(ban_times)} consecutive losses, {SAME_SYMBOL_BAN_HOURS}h ban")
+                _log_filter(symbol, direction, score, "BANNED", f"losses={len(ban_times)},ban={SAME_SYMBOL_BAN_HOURS}h")
                 remaining = [c for c in all_candidates if c[0] != symbol]
                 if remaining:
                     best = max(remaining, key=lambda x: abs(x[1]))
@@ -234,12 +270,14 @@ class DecisionEngine:
                 logger.info(
                     f"REJECTED: {symbol.split('/')[0]} {direction} — {reject_reason}"
                 )
+                _log_filter(symbol, direction, score, "NOT_RISING", reject_reason)
             else:
                 # 아직 사이클 수집 중
                 logger.info(
                     f"PENDING: {symbol.split('/')[0]} {direction} score={score:+.3f} "
                     f"— {len(prev_scores)}/{ENTRY_CONFIRM_CYCLES} cycles [{trajectory}]"
                 )
+                _log_filter(symbol, direction, score, "PENDING", f"cycles={len(prev_scores)}/{ENTRY_CONFIRM_CYCLES}")
             return None
 
         # N사이클 연속 확인 완료 → 진입!
@@ -254,6 +292,7 @@ class DecisionEngine:
             self._daily_trade_count = 0
         if self._daily_trade_count >= MAX_TRADES_PER_DAY:
             logger.info(f"DAILY LIMIT: {self._daily_trade_count}/{MAX_TRADES_PER_DAY} trades today, blocking new entry")
+            _log_filter(symbol, direction, score, "DAILY_LIMIT", f"count={self._daily_trade_count}/{MAX_TRADES_PER_DAY}")
             return None
         self._daily_trade_count += 1
 

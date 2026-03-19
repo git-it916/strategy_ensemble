@@ -50,8 +50,10 @@ ALPHA_WEIGHTS = {
 }
 
 # === 진입 임계값 (롱/숏 비대칭) ===
-LONG_ENTRY_THRESHOLD = 0.14            # 백테스트 기준 최적 (승률 50%, ROI+)
-SHORT_ENTRY_THRESHOLD = -0.16          # 숏은 약간 엄격
+# 알파 수정(FundingCarry tanh, RSI 중립 침묵, MomComposite 5d)으로
+# 스코어 분포 ~7% 축소 반영하여 임계값 하향 조정
+LONG_ENTRY_THRESHOLD = 0.12            # 0.14→0.12 (수정 후 5.1% 비율 ≈ 수정 전 4.7%)
+SHORT_ENTRY_THRESHOLD = -0.14          # -0.16→-0.14 (수정 후 7.6%, 비대칭 유지)
 
 # === SL/TP (롱/숏 비대칭) ===
 LONG_SL_PCT = -0.035                   # -0.05→-0.035 (x3=-10.5%, 큰 손실 방지)
@@ -81,9 +83,9 @@ ENTRY_CONFIRM_CYCLES = 2           # 3→2 (10분 확인, 인트라데이 속도
 ENTRY_REQUIRE_RISING = True        # 2사이클간 스코어 상승 요구
 ENTRY_MIN_SCORE_INCREASE = 0.01    # 0.015→0.01 (2사이클이므로 완화)
 # 청산 — 점진적 시그널 감쇠 (인트라데이: 빠른 반응)
-FADE_THRESHOLD = 0.08              # 진입 임계값의 ~57%
+FADE_THRESHOLD = 0.07              # 진입 임계값(0.12)의 ~58%
 FADE_DURATION_MIN = 15             # 30→15 (인트라데이)
-WEAK_THRESHOLD = 0.04              # 시그널 거의 소멸
+WEAK_THRESHOLD = 0.035             # 시그널 거의 소멸 (0.04→0.035 비례 조정)
 WEAK_DURATION_MIN = 10             # 15→10
 MAX_TRADES_PER_DAY = 6             # 4→6 (인트라데이 빈도 증가)
 SWITCH_MIN_HOLD_MINUTES = 30       # 120→30 (인트라데이)
@@ -100,6 +102,10 @@ STACKING_RETRAIN_INTERVAL_DAYS = 30
 
 # === 포지션 사이징 ===
 BALANCE_USAGE_RATIO = 0.95  # 잔고의 95% 사용
+
+# === 거래량 필터 ===
+VOL_FILTER_BASELINE_BARS = 36         # 최근 3시간 (36개 5분봉) baseline
+VOL_FILTER_THRESHOLD = 0.5           # baseline 대비 50% 미만이면 차단
 
 # === Binance ===
 BINANCE_RATE_LIMIT_SLEEP = 0.2
