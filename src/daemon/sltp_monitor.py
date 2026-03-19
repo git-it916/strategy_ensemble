@@ -5,7 +5,7 @@ Checks active positions every tick:
   1. Hard stop-loss — immediate exit
   2. Trailing stop — once profit exceeds activation threshold,
      trail the stop at a fixed % below the peak price
-  3. Fixed TP fallback — only used if trailing is disabled
+  3. Fixed TP fallback — only used if trailing is disabledㅁㄴㄻ
 """
 
 from __future__ import annotations
