@@ -39,9 +39,13 @@ class OpenClawTelegramHandler:
         self,
         bot_token: str | None = None,
         chat_id: str | None = None,
+        broadcast_chat_ids: list[str | int] | None = None,
     ):
         self.token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
+        self.broadcast_chat_ids = [
+            str(cid) for cid in (broadcast_chat_ids or [])
+        ]
 
         if not self.token or not self.chat_id:
             raise ValueError(
@@ -99,7 +103,7 @@ class OpenClawTelegramHandler:
         reply_markup: dict | None = None,
         parse_mode: str = "HTML",
     ) -> int:
-        """Send message, return message_id."""
+        """Send message to primary chat + broadcast chats, return message_id."""
         data: dict[str, Any] = {
             "chat_id": self.chat_id,
             "text": text[:4096],  # Telegram limit
@@ -108,12 +112,25 @@ class OpenClawTelegramHandler:
         if reply_markup:
             data["reply_markup"] = reply_markup
 
+        msg_id = 0
         try:
             resp = self._post("sendMessage", data)
-            return resp["result"]["message_id"]
+            msg_id = resp["result"]["message_id"]
         except Exception as e:
             logger.error(f"Failed to send message: {e}")
-            return 0
+
+        # Broadcast to additional chats (no reply_markup — those are interactive)
+        for cid in self.broadcast_chat_ids:
+            try:
+                self._post("sendMessage", {
+                    "chat_id": cid,
+                    "text": text[:4096],
+                    "parse_mode": parse_mode,
+                })
+            except Exception as e:
+                logger.warning(f"Broadcast to {cid} failed: {e}")
+
+        return msg_id
 
     def answer_callback(self, callback_query_id: str, text: str = "") -> None:
         """Answer inline keyboard callback."""

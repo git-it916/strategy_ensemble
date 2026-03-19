@@ -27,7 +27,9 @@ import pandas as pd
 import yaml
 
 from config.settings import (
+    DAEMON,
     ENSEMBLE,
+    GATES,
     MODELS_DIR,
     SONNET_DECISION,
     STRATEGIES,
@@ -36,8 +38,16 @@ from config.settings import (
     WEBSOCKET_CONFIG,
 )
 
+# V2 alpha system imports (lazy-loaded via ALPHA_VERSION)
+try:
+    from config.settings import ALPHA_VERSION, STRATEGIES_V2, ENSEMBLE_V2
+except ImportError:
+    ALPHA_VERSION = "v1"
+    STRATEGIES_V2 = {}
+    ENSEMBLE_V2 = {}
+
 from src.daemon.signal_aggregator import SignalAggregator, AggregatedSignal
-from src.daemon.sonnet_decision_maker import SonnetDecisionMaker, SonnetDecision, DECISION_LOG_DIR
+from src.daemon.sonnet_decision_maker import SonnetDecisionMaker, SonnetDecision, PositionDecision, DECISION_LOG_DIR
 from src.daemon.position_store import PositionStore
 from src.daemon.sltp_monitor import SLTPMonitor
 from src.daemon.trade_proposal import TradeProposalBuilder
@@ -78,6 +88,7 @@ class UnifiedDaemon:
         self._last_rebalance: datetime | None = None
         self._last_lifecycle: datetime | None = None
         self._last_research: datetime | None = None
+        self._last_data_refresh: datetime | None = None
 
         # Components (initialized in initialize())
         self.keys: dict = {}
@@ -100,6 +111,8 @@ class UnifiedDaemon:
 
         # Data
         self._prices: pd.DataFrame | None = None
+        self._prices_1h: pd.DataFrame | None = None  # Hourly OHLCV for intraday alphas
+        self._prices_5m: pd.DataFrame | None = None  # 5m OHLCV for intraday momentum
         self._features: pd.DataFrame | None = None
         self._universe: list[str] = []
 
@@ -109,8 +122,14 @@ class UnifiedDaemon:
         # openclaw_1 alpha instances
         self._base_alphas: dict[str, Any] = {}
 
+        # V2 alpha system (initialized if ALPHA_VERSION == "v2")
+        self._v2_alphas: dict[str, Any] = {}
+        self._v2_alpha_categories: dict[str, str] = {}
+        self._data_manager = None
+        self._enhanced_aggregator = None
+
         # Config
-        self._rebalance_interval = WEBSOCKET_CONFIG.get("signal_interval_minutes", 15)
+        self._rebalance_interval = DAEMON.get("rebalance_interval_minutes", 30)
 
     # ==================================================================
     # Initialization
@@ -130,6 +149,8 @@ class UnifiedDaemon:
         self._init_binance_api()
         self._load_data()
         self._init_base_alphas()
+        if ALPHA_VERSION == "v2":
+            self._init_v2_alphas()
         self._init_ensemble()
         self._init_openclaw()
         self._init_rebalancer()
@@ -185,6 +206,53 @@ class UnifiedDaemon:
             f"{self._prices['ticker'].nunique()} symbols"
         )
 
+        # Fetch 7 days of 1h candles for intraday alphas (RSI, VWAP)
+        logger.info("Fetching 7d hourly OHLCV for intraday alphas...")
+        try:
+            self._prices_1h = self.binance_api.get_ohlcv_batch(
+                self._universe, timeframe="1h", days=7,
+            )
+            if self._prices_1h is not None and not self._prices_1h.empty:
+                # Rename 'date' to 'datetime' for intraday resolution
+                if "date" in self._prices_1h.columns:
+                    self._prices_1h = self._prices_1h.rename(columns={"date": "datetime"})
+                logger.info(
+                    f"Hourly OHLCV: {len(self._prices_1h)} rows, "
+                    f"{self._prices_1h['ticker'].nunique()} symbols"
+                )
+            else:
+                logger.warning("Hourly OHLCV fetch returned empty")
+                self._prices_1h = None
+        except Exception as e:
+            logger.error(f"Failed to fetch hourly OHLCV: {e}")
+            self._prices_1h = None
+
+        # Fetch 5m candles for intraday momentum timing
+        intraday_mom_cfg = STRATEGIES.get("intraday_time_series_momentum", {})
+        intraday_mom_tf = intraday_mom_cfg.get("timeframe", "5m")
+        intraday_mom_days = int(intraday_mom_cfg.get("history_days", 5))
+        logger.info(
+            f"Fetching {intraday_mom_days}d {intraday_mom_tf} OHLCV "
+            "for intraday momentum..."
+        )
+        try:
+            self._prices_5m = self.binance_api.get_ohlcv_batch(
+                self._universe, timeframe=intraday_mom_tf, days=intraday_mom_days,
+            )
+            if self._prices_5m is not None and not self._prices_5m.empty:
+                if "date" in self._prices_5m.columns:
+                    self._prices_5m = self._prices_5m.rename(columns={"date": "datetime"})
+                logger.info(
+                    f"5m OHLCV: {len(self._prices_5m)} rows, "
+                    f"{self._prices_5m['ticker'].nunique()} symbols"
+                )
+            else:
+                logger.warning("5m OHLCV fetch returned empty")
+                self._prices_5m = None
+        except Exception as e:
+            logger.error(f"Failed to fetch 5m OHLCV: {e}")
+            self._prices_5m = None
+
         logger.info("Fetching 90d funding rates...")
         funding = self.binance_api.get_funding_history_batch(self._universe, days=90)
 
@@ -200,8 +268,120 @@ class UnifiedDaemon:
             self._features = None
             logger.warning("No funding rate data")
 
+        self._last_data_refresh = datetime.now()
+
+    def _refresh_data(self) -> None:
+        """
+        Re-fetch OHLCV and funding rate data from Binance.
+
+        Called periodically (every 4 hours) so that alpha signals and regime
+        detection use up-to-date price data instead of stale startup data.
+        Only re-fetches prices and funding — does NOT re-detect universe
+        or re-fit alphas (those are heavier operations).
+        """
+        logger.info("Refreshing price & funding data...")
+        try:
+            lookback_days = 300
+            new_prices = self.binance_api.get_ohlcv_batch(
+                self._universe, timeframe="1d", days=lookback_days,
+            )
+            if new_prices is not None and not new_prices.empty:
+                self._prices = new_prices
+                logger.info(
+                    f"Prices refreshed: {len(self._prices)} rows, "
+                    f"{self._prices['ticker'].nunique()} symbols"
+                )
+            else:
+                logger.warning("Price refresh returned empty — keeping old data")
+
+            # Refresh hourly OHLCV for intraday alphas
+            try:
+                new_1h = self.binance_api.get_ohlcv_batch(
+                    self._universe, timeframe="1h", days=7,
+                )
+                if new_1h is not None and not new_1h.empty:
+                    if "date" in new_1h.columns:
+                        new_1h = new_1h.rename(columns={"date": "datetime"})
+                    self._prices_1h = new_1h
+                    logger.info(f"Hourly OHLCV refreshed: {len(self._prices_1h)} rows")
+            except Exception as e:
+                logger.error(f"Hourly OHLCV refresh failed: {e}")
+
+            # Refresh 5m OHLCV for intraday momentum
+            intraday_mom_cfg = STRATEGIES.get("intraday_time_series_momentum", {})
+            intraday_mom_tf = intraday_mom_cfg.get("timeframe", "5m")
+            intraday_mom_days = int(intraday_mom_cfg.get("history_days", 5))
+            try:
+                new_5m = self.binance_api.get_ohlcv_batch(
+                    self._universe, timeframe=intraday_mom_tf, days=intraday_mom_days,
+                )
+                if new_5m is not None and not new_5m.empty:
+                    if "date" in new_5m.columns:
+                        new_5m = new_5m.rename(columns={"date": "datetime"})
+                    self._prices_5m = new_5m
+                    logger.info(f"5m OHLCV refreshed: {len(self._prices_5m)} rows")
+            except Exception as e:
+                logger.error(f"5m OHLCV refresh failed: {e}")
+
+            # Refresh funding rates
+            funding = self.binance_api.get_funding_history_batch(
+                self._universe, days=90,
+            )
+            if not funding.empty and self._prices is not None:
+                self._features = self._prices[["date", "ticker"]].copy()
+                self._features = self._features.merge(
+                    funding[["date", "ticker", "funding_rate"]],
+                    on=["date", "ticker"],
+                    how="left",
+                )
+                logger.info(f"Features refreshed: {len(self._features)} rows")
+
+            self._last_data_refresh = datetime.now()
+
+        except Exception as e:
+            logger.error(f"Data refresh failed (keeping old data): {e}")
+
+    def _refresh_intraday_data(self) -> None:
+        """
+        Refresh 1h and 5m OHLCV every rebalance cycle so intraday alphas
+        (RSI, VWAP, intraday_tsm — 85% of weight) see fresh prices.
+        Daily OHLCV and funding rates stay on the 4h schedule.
+        """
+        try:
+            new_1h = self.binance_api.get_ohlcv_batch(
+                self._universe, timeframe="1h", days=7,
+            )
+            if new_1h is not None and not new_1h.empty:
+                if "date" in new_1h.columns:
+                    new_1h = new_1h.rename(columns={"date": "datetime"})
+                self._prices_1h = new_1h
+                logger.info(f"1h refreshed: {len(self._prices_1h)} rows")
+        except Exception as e:
+            logger.warning(f"1h refresh failed (keeping old): {e}")
+
+        try:
+            intraday_cfg = STRATEGIES.get("intraday_time_series_momentum", {})
+            tf = intraday_cfg.get("timeframe", "5m")
+            days = int(intraday_cfg.get("history_days", 5))
+            new_5m = self.binance_api.get_ohlcv_batch(
+                self._universe, timeframe=tf, days=days,
+            )
+            if new_5m is not None and not new_5m.empty:
+                if "date" in new_5m.columns:
+                    new_5m = new_5m.rename(columns={"date": "datetime"})
+                self._prices_5m = new_5m
+                logger.info(f"5m refreshed: {len(self._prices_5m)} rows")
+        except Exception as e:
+            logger.warning(f"5m refresh failed (keeping old): {e}")
+
+    def _should_refresh_data(self, now: datetime) -> bool:
+        """Check if price data should be refreshed (every 4 hours)."""
+        if self._last_data_refresh is None:
+            return False  # Just loaded during init
+        return (now - self._last_data_refresh) > timedelta(hours=4)
+
     def _init_base_alphas(self) -> None:
-        """Load and fit the 7 openclaw_1 rule-based alphas."""
+        """Load and fit openclaw_1 rule-based alphas."""
         from src.alphas.openclaw_1 import (
             CSMomentum,
             TimeSeriesMomentum,
@@ -210,6 +390,9 @@ class UnifiedDaemon:
             VolumeMomentum,
             LowVolatilityAnomaly,
             FundingRateCarry,
+            IntradayRSI,
+            IntradayTimeSeriesMomentum,
+            IntradayVWAP,
         )
 
         alpha_classes = [
@@ -222,16 +405,303 @@ class UnifiedDaemon:
             FundingRateCarry,
         ]
 
+        # Intraday alphas
+        intraday_classes = [IntradayRSI, IntradayVWAP, IntradayTimeSeriesMomentum]
+
         for cls in alpha_classes:
             try:
-                alpha = cls()
+                if cls is CSMomentum:
+                    cfg = STRATEGIES.get("cs_momentum", {})
+                    alpha = cls(
+                        lookback_days=int(cfg.get("lookback_days", 21)),
+                        skip_days=int(cfg.get("skip_days", 3)),
+                    )
+                elif cls is TimeSeriesMomentum:
+                    cfg = STRATEGIES.get("time_series_momentum", {})
+                    alpha = cls(
+                        lookback_days=int(cfg.get("lookback_days", 20)),
+                    )
+                elif cls is TimeSeriesMeanReversion:
+                    cfg = STRATEGIES.get("time_series_mean_reversion", {})
+                    alpha = cls(
+                        signal_window=int(cfg.get("signal_window", 5)),
+                        baseline_window=int(cfg.get("baseline_window", 60)),
+                    )
+                elif cls is PriceVolumeDivergence:
+                    cfg = STRATEGIES.get("pv_divergence", {})
+                    alpha = cls(
+                        lookback_days=int(cfg.get("lookback_days", 20)),
+                    )
+                elif cls is VolumeMomentum:
+                    cfg = STRATEGIES.get("volume_momentum", {})
+                    alpha = cls(
+                        lookback_days=int(cfg.get("lookback_days", 20)),
+                    )
+                elif cls is LowVolatilityAnomaly:
+                    cfg = STRATEGIES.get("low_volatility_anomaly", {})
+                    alpha = cls(
+                        lookback_days=int(cfg.get("lookback_days", 20)),
+                    )
+                elif cls is FundingRateCarry:
+                    cfg = STRATEGIES.get("funding_rate_carry", {})
+                    alpha = cls(
+                        lookback_days=int(cfg.get("lookback_days", 14)),
+                        abs_threshold=float(cfg.get("abs_threshold", 0.0001)),
+                    )
+                else:
+                    alpha = cls()
                 alpha.fit(self._prices, self._features)
                 self._base_alphas[alpha.name] = alpha
                 logger.info(f"  Base alpha loaded: {alpha.name}")
             except Exception as e:
                 logger.error(f"Failed to load alpha {cls.__name__}: {e}")
 
+        for cls in intraday_classes:
+            try:
+                if cls is IntradayRSI:
+                    cfg = STRATEGIES.get("intraday_rsi", {})
+                    alpha = cls(
+                        rsi_period=int(cfg.get("rsi_period", 14)),
+                        oversold=float(cfg.get("oversold", 30)),
+                        overbought=float(cfg.get("overbought", 70)),
+                    )
+                    fit_prices = self._prices_1h if self._prices_1h is not None else self._prices
+                elif cls is IntradayVWAP:
+                    cfg = STRATEGIES.get("intraday_vwap", {})
+                    alpha = cls(
+                        lookback_bars=int(cfg.get("lookback_bars", 24)),
+                    )
+                    fit_prices = self._prices_1h if self._prices_1h is not None else self._prices
+                elif cls is IntradayTimeSeriesMomentum:
+                    cfg = STRATEGIES.get("intraday_time_series_momentum", {})
+                    alpha = cls(
+                        lookback_bars=int(cfg.get("lookback_bars", 36)),
+                        scale=float(cfg.get("scale", 5.0)),
+                    )
+                    fit_prices = self._prices_5m if self._prices_5m is not None else self._prices
+                else:
+                    alpha = cls()
+                    fit_prices = self._prices
+                alpha.fit(fit_prices, self._features)
+                self._base_alphas[alpha.name] = alpha
+                logger.info(f"  Intraday alpha loaded: {alpha.name}")
+            except Exception as e:
+                logger.error(f"Failed to load intraday alpha {cls.__name__}: {e}")
+
         logger.info(f"Base alphas: {len(self._base_alphas)} loaded")
+
+    def _init_v2_alphas(self) -> None:
+        """Load and fit v2 alpha suite — 10 alphas hardcoded."""
+        from src.alphas.v2 import (
+            MomentumMultiScale,
+            MomentumComposite,
+            FundingCarryEnhanced,
+            MeanReversionMultiHorizon,
+            IntradayVWAPV2,
+            IntradayRSIV2,
+            OrderbookImbalance,
+            DerivativesSentiment,
+            VolatilityRegime,
+            SpreadMomentum,
+        )
+        from src.data.data_manager import DataManager
+        from src.daemon.enhanced_signal_aggregator import EnhancedSignalAggregator
+
+        # Initialize DataManager
+        settings = {"UNIVERSE": UNIVERSE, "STRATEGIES": STRATEGIES}
+        self._data_manager = DataManager(self.binance_api, settings)
+        self._data_manager._prices_1d = self._prices
+        self._data_manager._prices_1h = self._prices_1h
+        self._data_manager._prices_5m = self._prices_5m
+        self._data_manager._features = self._features
+        self._data_manager._universe = self._universe
+        self._data_manager._init_orderbook_collector()
+        self._data_manager._last_daily_refresh = datetime.now()
+        self._data_manager._last_intraday_refresh = datetime.now()
+
+        self._enhanced_aggregator = EnhancedSignalAggregator()
+
+        # ──────────────────────────────────────────────────────────
+        # 10 alphas + 1 modifier — hardcoded, no config loop
+        # ──────────────────────────────────────────────────────────
+        self._v2_alphas: dict[str, Any] = {}
+        self._v2_alpha_categories: dict[str, str] = {}
+        self._v2_weights: dict[str, float] = {}
+
+        def _register(alpha, category: str, weight: float):
+            try:
+                alpha.fit(self._prices, self._features)
+                self._v2_alphas[alpha.name] = alpha
+                self._v2_alpha_categories[alpha.name] = category
+                self._v2_weights[alpha.name] = weight
+                logger.info(f"  V2: {alpha.name} ({category}, w={weight:.0%})")
+            except Exception as e:
+                logger.error(f"V2 alpha init failed: {alpha.name}: {e}")
+
+        # 1. MomentumMultiScale — 22% (primary intraday timing)
+        _register(
+            MomentumMultiScale(
+                name="MomentumMultiScale",
+                lookbacks=(6, 18, 36),
+                weights=(0.35, 0.35, 0.30),
+                scale=7.0,
+            ),
+            category="momentum", weight=0.22,
+        )
+
+        # 2. FundingCarryEnhanced — 18% (structural carry)
+        _register(
+            FundingCarryEnhanced(
+                name="FundingCarryEnhanced",
+                lookback_days=14,
+                velocity_lookback=7,
+            ),
+            category="carry", weight=0.18,
+        )
+
+        # 3. MomentumComposite — 15% (absolute + relative + risk-adjusted)
+        _register(
+            MomentumComposite(
+                name="MomentumComposite",
+                lookback_days=20,
+                skip_days=3,
+            ),
+            category="momentum", weight=0.15,
+        )
+
+        # 4. IntradayVWAPV2 — 10% (VWAP band mean-reversion)
+        _register(
+            IntradayVWAPV2(
+                name="IntradayVWAPV2",
+                lookback_bars=24,
+                band_threshold=1.5,
+            ),
+            category="mean_reversion", weight=0.10,
+        )
+
+        # 5. IntradayRSIV2 — 8% (RSI overbought/oversold)
+        _register(
+            IntradayRSIV2(
+                name="IntradayRSIV2",
+                rsi_period=14,
+                oversold=30.0,
+                overbought=70.0,
+            ),
+            category="mean_reversion", weight=0.08,
+        )
+
+        # 6. DerivativesSentiment — 8% (OI-funding divergence)
+        _register(
+            DerivativesSentiment(
+                name="DerivativesSentiment",
+                oi_change_threshold=5.0,
+                funding_threshold=0.0003,
+            ),
+            category="carry", weight=0.08,
+        )
+
+        # 7. MeanReversionMultiHorizon — 8% (multi-horizon z-score)
+        _register(
+            MeanReversionMultiHorizon(
+                name="MeanReversionMultiHorizon",
+                horizons=[(3, 20), (5, 60), (10, 120)],
+            ),
+            category="mean_reversion", weight=0.08,
+        )
+
+        # 8. OrderbookImbalance — 5% (미검증 → 보수적 시작)
+        _register(
+            OrderbookImbalance(
+                name="OrderbookImbalance",
+                scale=3.0,
+            ),
+            category="microstructure", weight=0.05,
+        )
+
+        # 9. SpreadMomentum — 3% (미검증 → 최소 시작)
+        _register(
+            SpreadMomentum(
+                name="SpreadMomentum",
+                min_snapshots=5,
+                scale=2.0,
+            ),
+            category="microstructure", weight=0.03,
+        )
+
+        # 10. VolatilityRegime — 3% (confidence modifier)
+        _register(
+            VolatilityRegime(name="VolatilityRegime"),
+            category="composite", weight=0.03,
+        )
+
+        total_w = sum(self._v2_weights.values())
+        logger.info(
+            f"V2 alphas: {len(self._v2_alphas)} loaded, "
+            f"total weight={total_w:.2f}"
+        )
+
+        # Stacking meta-model 초기화
+        alpha_names = list(self._v2_alphas.keys())
+        self._enhanced_aggregator.init_stacking(
+            alpha_names=alpha_names,
+            forward_horizon=5,
+            train_window_days=90,
+            retrain_interval_days=30,
+        )
+        # 기존 학습 모델 로드 시도
+        self._enhanced_aggregator.load_stacking()
+
+    def _collect_v2_signals(self) -> tuple[dict, dict, float]:
+        """
+        Collect signals from v2 alphas using DataBundle.
+        Uses generate_signals_v2_safe() for data_requirements validation.
+
+        Returns:
+            (alpha_signals, alpha_metadata, vol_confidence)
+        """
+        bundle = self._data_manager.get_bundle()
+        now = datetime.now(timezone.utc)
+
+        alpha_signals: dict[str, pd.DataFrame] = {}
+        alpha_metadata: dict[str, dict] = {}
+        vol_confidence = 1.0
+
+        for name, alpha in self._v2_alphas.items():
+            # generate_signals_v2_safe: 데이터 검증 + 에러 핸들링 내장
+            result = alpha.generate_signals_v2_safe(now, bundle)
+            if result.signals is not None and not result.signals.empty:
+                alpha_signals[name] = result.signals
+                alpha_metadata[name] = {
+                    "confidence": result.confidence,
+                    "regime_affinity": result.regime_affinity,
+                    "signal_decay_hours": result.signal_decay_hours,
+                }
+                alpha_metadata[name].update(result.metadata)
+
+                if name == "VolatilityRegime":
+                    vol_confidence = result.confidence
+
+        return alpha_signals, alpha_metadata, vol_confidence
+
+    def _aggregate_v2_signals(
+        self,
+        alpha_signals: dict[str, pd.DataFrame],
+        alpha_metadata: dict[str, dict],
+        vol_confidence: float,
+        regime: str = "sideways",
+    ):
+        """Aggregate v2 signals using EnhancedSignalAggregator."""
+        # 하드코딩된 weights 사용 (config가 아닌 _init_v2_alphas에서 설정)
+        regime_mults = ENSEMBLE_V2.get("regime_preferences", {}).get(regime, {})
+
+        return self._enhanced_aggregator.aggregate(
+            alpha_signals=alpha_signals,
+            alpha_weights=self._v2_weights,
+            alpha_metadata=alpha_metadata,
+            alpha_categories=self._v2_alpha_categories,
+            regime_multipliers=regime_mults,
+            vol_confidence=vol_confidence,
+        )
 
     def _init_ensemble(self) -> None:
         """Load trained ensemble model (optional)."""
@@ -278,6 +748,7 @@ class UnifiedDaemon:
         self.telegram = OpenClawTelegramHandler(
             bot_token=telegram_cfg.get("bot_token"),
             chat_id=telegram_cfg.get("chat_id"),
+            broadcast_chat_ids=telegram_cfg.get("broadcast_chat_ids", []),
         )
         self.formatter = TelegramFormatter()
 
@@ -437,6 +908,12 @@ class UnifiedDaemon:
                         triggered = self.sltp_monitor.check_all()
                         for t in triggered:
                             logger.info(f"SL/TP triggered: {t}")
+                            # Record cooldown so re-entry is blocked
+                            ticker = t.get("ticker")
+                            if ticker:
+                                if not hasattr(self, "_close_cooldowns"):
+                                    self._close_cooldowns = {}
+                                self._close_cooldowns[ticker] = datetime.now()
                     except Exception as e:
                         logger.error(f"SL/TP monitor error: {e}")
 
@@ -464,7 +941,14 @@ class UnifiedDaemon:
                     except Exception as e:
                         logger.error(f"Lifecycle error: {e}")
 
-                # 4. Auto research (24h)
+                # 4. Periodic data refresh (every 4 hours)
+                if self._should_refresh_data(now):
+                    try:
+                        self._refresh_data()
+                    except Exception as e:
+                        logger.error(f"Data refresh error: {e}")
+
+                # 5. Auto research (24h)
                 if self.enable_research and self._should_research(now):
                     try:
                         self.telegram.send_message(
@@ -510,55 +994,225 @@ class UnifiedDaemon:
         """
         logger.info(f"{'='*40} REBALANCE CYCLE {'='*40}")
 
-        # -- Step 1: Collect signals --
-        alpha_signals, alpha_entries = self._collect_all_signals(now)
-        if not alpha_signals:
-            logger.info("No signals generated from any source")
-            return
-        logger.info(f"Signals from {len(alpha_signals)} alphas")
+        # -- Step 0: Refresh intraday data every cycle for fresh signals --
+        self._refresh_intraday_data()
 
-        # -- Step 1.5: Aggregate signals with config weights + regime --
-        alpha_weights = self._config_weights_with_regime(alpha_signals)
-        aggregated = self.signal_aggregator.aggregate(
-            alpha_signals=alpha_signals,
-            alpha_weights=alpha_weights,
-        )
+        # ================================================================
+        # Step 1 + 1.5: 시그널 수집 + 통합 (v1/v2 분기)
+        # ================================================================
+        if ALPHA_VERSION == "v2" and self._v2_alphas:
+            # ── V2: DataBundle → 10개 알파 → Stacking/가중합 ──
+            if self._data_manager is not None:
+                self._data_manager._prices_1d = self._prices
+                self._data_manager._prices_1h = self._prices_1h
+                self._data_manager._prices_5m = self._prices_5m
+                self._data_manager._features = self._features
+                self._data_manager.refresh_orderbooks()
+
+            alpha_signals, alpha_metadata, vol_confidence = self._collect_v2_signals()
+            if not alpha_signals:
+                logger.info("No V2 signals generated")
+                return
+            logger.info(f"V2 signals from {len(alpha_signals)} alphas")
+
+            # 레짐 감지 (기존 로직 재활용)
+            regime = self._detect_regime() if hasattr(self, '_detect_regime') else "sideways"
+            aggregated_v2 = self._aggregate_v2_signals(
+                alpha_signals, alpha_metadata, vol_confidence, regime,
+            )
+
+            # Stacking 재학습 체크 (30일마다)
+            if self._enhanced_aggregator is not None and self._prices is not None:
+                self._enhanced_aggregator.retrain_stacking_if_needed(self._prices)
+
+            # v1 aggregated 인터페이스로 변환 (하위 코드 호환)
+            from src.daemon.signal_aggregator import AggregatedSignal
+            aggregated = AggregatedSignal(
+                scores=aggregated_v2.effective_scores,
+                contributions=aggregated_v2.contributions,
+                weights_used=aggregated_v2.weights_used,
+            )
+            # alpha_signals는 이미 {name: DataFrame} 형태
+            alpha_entries = {}  # v2에서는 미사용
+
+            method = aggregated_v2.ensemble_method
+            logger.info(
+                f"V2 aggregated ({method}): {len(aggregated.scores)} tickers, "
+                f"top: {sorted(aggregated.scores.items(), key=lambda x: abs(x[1]), reverse=True)[:3]}"
+            )
+        else:
+            # ── V1: 기존 가중합 경로 ──
+            alpha_signals, alpha_entries = self._collect_all_signals(now)
+            if not alpha_signals:
+                logger.info("No signals generated from any source")
+                return
+            logger.info(f"Signals from {len(alpha_signals)} alphas")
+
+            alpha_weights = self._config_weights_with_regime(alpha_signals)
+            aggregated = self.signal_aggregator.aggregate(
+                alpha_signals=alpha_signals,
+                alpha_weights=alpha_weights,
+            )
+
         logger.info(
             f"Aggregated: {len(aggregated.scores)} tickers, "
             f"top: {sorted(aggregated.scores.items(), key=lambda x: abs(x[1]), reverse=True)[:5]}"
         )
 
+        # -- Step 1.6: Squeeze risk detection (informational for Sonnet) --
+        # Detect squeeze conditions and pass as context — Sonnet decides whether to act
+        squeeze_warnings = {}
+        if self._features is not None and "funding_rate" in self._features.columns:
+            latest_funding = self._features.sort_values("date").groupby("ticker").last()
+            for ticker, score in list(aggregated.scores.items()):
+                try:
+                    fr = latest_funding.loc[ticker, "funding_rate"] if ticker in latest_funding.index else None
+                    if fr is None or pd.isna(fr):
+                        continue
+                    # Get 24h price return
+                    tkr_prices = self._prices[self._prices["ticker"] == ticker].sort_values("date") if self._prices is not None else None
+                    if tkr_prices is None or len(tkr_prices) < 2:
+                        continue
+                    current_price = tkr_prices["close"].iloc[-1]
+                    past_idx = max(0, len(tkr_prices) - 2)
+                    past_price = tkr_prices["close"].iloc[past_idx]
+                    if past_price <= 0:
+                        continue
+                    price_ret = (current_price / past_price) - 1
+
+                    # Short squeeze risk: SHORT signal + negative funding + price rising
+                    if score < 0 and fr < -0.0005 and price_ret > 0.05:
+                        logger.warning(
+                            f"SQUEEZE RISK: {ticker} SHORT score {score:.3f} "
+                            f"(funding={fr:.4%}, 24h={price_ret:+.1%}) — Sonnet will decide"
+                        )
+                        squeeze_warnings[ticker] = f"SHORT SQUEEZE RISK: funding={fr:.4%} (shorts pay), price 24h={price_ret:+.1%}. Shorting is dangerous."
+                    # Long squeeze risk: LONG signal + positive funding + price falling
+                    elif score > 0 and fr > 0.0005 and price_ret < -0.05:
+                        logger.warning(
+                            f"SQUEEZE RISK: {ticker} LONG score {score:.3f} "
+                            f"(funding={fr:.4%}, 24h={price_ret:+.1%}) — Sonnet will decide"
+                        )
+                        squeeze_warnings[ticker] = f"LONG SQUEEZE RISK: funding={fr:.4%} (longs pay), price 24h={price_ret:+.1%}. Longing is dangerous."
+                except Exception as e:
+                    logger.debug(f"Squeeze check failed for {ticker}: {e}")
+
+        suppressed_tickers = set()
+        defensive_scores: dict[str, dict[str, float]] = {}
+        market_defensive_alerts = {}
+
+        # -- Step 1.8: Signal-change detection — skip cycle if no positions and signals unchanged --
+        # Only skip Sonnet when: (1) no positions held AND (2) signals unchanged
+        # When holding positions, ALWAYS call Sonnet for ongoing management
+        top5_key = tuple(
+            sorted(aggregated.scores.items(), key=lambda x: abs(x[1]), reverse=True)[:5]
+        )
+        if not hasattr(self, "_last_signal_key"):
+            self._last_signal_key = None
+            self._signal_unchanged_count = 0
+
+        has_positions = bool(
+            self.position_store and self.position_store.get_active()
+        )
+
+        if top5_key == self._last_signal_key and not has_positions:
+            self._signal_unchanged_count += 1
+            if self._signal_unchanged_count < 3:  # Skip up to 2 cycles (10min) when in cash
+                logger.info(
+                    f"No positions & signals unchanged ({self._signal_unchanged_count}/3) — skipping Sonnet call. "
+                    f"Top: {[t.replace('/USDT:USDT','') for t,_ in top5_key]}"
+                )
+                return
+            else:
+                logger.info("No positions & signals unchanged for 15min — forcing Sonnet check")
+                self._signal_unchanged_count = 0
+        else:
+            self._signal_unchanged_count = 0
+        self._last_signal_key = top5_key
+
         # -- Step 2: Market context --
         market_context = self._build_market_context()
         market_context["aggregated_scores"] = aggregated.scores
         market_context["alpha_weights"] = aggregated.weights_used
+        if market_defensive_alerts:
+            market_context["defensive_alerts"] = {
+                t.replace("/USDT:USDT", ""): {k: round(v, 2) for k, v in d.items()}
+                for t, d in market_defensive_alerts.items()
+            }
+        if suppressed_tickers:
+            market_context["suppressed_tickers"] = [
+                t.replace("/USDT:USDT", "") for t in suppressed_tickers
+            ]
+        if squeeze_warnings:
+            market_context["squeeze_warnings"] = squeeze_warnings
 
         # -- Step 3: Current state --
         current_positions = self.binance_api.get_positions()
         account = self.binance_api.get_account()
         balance = float(account.get("total_wallet_balance", 0))
 
-        # -- Step 4: Sonnet decision --
-        managed = self.position_store.get_active() if self.position_store else None
-        decision = self.sonnet_decision_maker.make_decision(
-            alpha_signals=alpha_signals,
+        # -- Step 3.5: Sync managed_positions with actual Binance positions --
+        self._sync_position_store(current_positions)
+
+        # -- Step 3.7: Build cooldown set --
+        cooldown_tickers = set()
+        if self.position_store:
+            recently_closed = self.position_store.get_recently_closed(minutes=30)
+            for cp in recently_closed:
+                cooldown_tickers.add(cp.ticker)
+
+        # -- Step 4: Rule-based decision (Sonnet 대체) --
+        from src.daemon.rule_decision_maker import RuleDecisionMaker
+        rule_maker = RuleDecisionMaker()
+        decision = rule_maker.make_decision(
+            effective_scores=aggregated.scores,
+            contributions=aggregated.contributions,
             current_positions=current_positions,
-            account_info=account,
-            market_context=market_context,
-            managed_positions=managed,
+            prices=self._prices,
+            managed_positions=(
+                self.position_store.get_active() if self.position_store else None
+            ),
+            cooldown_tickers=cooldown_tickers,
         )
 
         if not decision.positions:
-            logger.info("Sonnet: no positions (staying in cash)")
-            self.telegram.send_message(
-                f"<b>Sonnet Decision</b>: Stay in cash\n"
-                f"{decision.market_assessment}\n"
-                f"{decision.risk_note}"
-            )
+            logger.info("Rule decision: no positions (staying in cash)")
             return
 
-        # -- Step 5: Send to Telegram --
-        proposal_text = self._format_sonnet_proposal(decision, balance)
+        # -- Step 5: Telegram 알림 (진입/청산) --
+        from src.daemon.telegram_notifier import TelegramNotifier
+        tg_notifier = self._get_telegram_notifier()
+
+        for pos in decision.positions:
+            if pos.action in ("LONG", "SHORT"):
+                # 신규 진입 알림
+                alpha_contribs = aggregated.contributions.get(pos.ticker, {})
+                # 현재가 조회
+                entry_price = self._get_current_price(pos.ticker)
+                if entry_price > 0:
+                    if pos.action == "LONG":
+                        sl_price = entry_price * (1 + pos.stop_loss_pct)
+                        tp_price = entry_price * (1 + pos.take_profit_pct)
+                    else:
+                        sl_price = entry_price * (1 - pos.stop_loss_pct)
+                        tp_price = entry_price * (1 - pos.take_profit_pct)
+
+                    if tg_notifier:
+                        # 앙상블 메서드 정보
+                        ensemble_method = "stacking" if hasattr(aggregated, 'ensemble_method') else "weighted_sum"
+                        tg_notifier.send_entry(
+                            coin=pos.ticker,
+                            direction=pos.action,
+                            entry_price=entry_price,
+                            stop_loss_price=sl_price,
+                            take_profit_price=tp_price,
+                            alpha_contributions=alpha_contribs,
+                            ensemble_method=ensemble_method,
+                            ensemble_score=aggregated.scores.get(pos.ticker, 0),
+                        )
+
+        # 기존 텔레그램도 간단 알림
+        proposal_text = self._format_rule_proposal(decision, balance)
 
         if self.dry_run:
             self.telegram.send_message(
@@ -585,6 +1239,182 @@ class UnifiedDaemon:
             logger.info("Trade APPROVED by user")
             self.telegram.send_message("승인됨 — 주문 실행 중...")
 
+        # -- Step 5.8: Anti-churn filter --
+        # Block CLOSE on positions younger than min_hold_minutes
+        # Block LONG/SHORT on tickers closed within cooldown_minutes
+        from config.settings import DAEMON
+        min_hold_min = DAEMON.get("min_hold_minutes", 60)
+        cooldown_min = DAEMON.get("cooldown_after_close_minutes", 60)
+        now_dt = datetime.now()
+
+        # Build lookup from managed positions
+        managed_lookup = {}
+        if self.position_store:
+            for mp in self.position_store.get_active():
+                managed_lookup[mp.ticker] = mp
+
+        # Also track entry times from _position_open_times (survives managed_positions gaps)
+        if not hasattr(self, "_position_open_times"):
+            self._position_open_times = {}
+        # Populate from managed_positions for any we haven't tracked yet
+        for ticker, mp in managed_lookup.items():
+            if ticker not in self._position_open_times:
+                try:
+                    self._position_open_times[ticker] = datetime.fromisoformat(mp.entry_time)
+                except Exception:
+                    pass
+
+        # Build set of tickers currently held on Binance
+        binance_held_tickers = set()
+        if current_positions is not None and not current_positions.empty:
+            for _, row in current_positions.iterrows():
+                if abs(float(row.get("size", 0))) > 0:
+                    binance_held_tickers.add(row.get("ticker", ""))
+
+        # Signal gate prefetch (new entries only)
+        signal_gate_cfg = GATES.get("signal_gate", {})
+        signal_gate_enabled = bool(
+            GATES.get("enabled", False) and signal_gate_cfg.get("enabled", False)
+        )
+        quote_volumes_24h: dict[str, float] = {}
+        if signal_gate_enabled:
+            new_entry_tickers = sorted({
+                p.ticker for p in decision.positions
+                if p.action in ("LONG", "SHORT") and p.ticker not in binance_held_tickers
+            })
+            if new_entry_tickers:
+                quote_volumes_24h = self.binance_api.get_quote_volume_batch(new_entry_tickers)
+
+        filtered_positions = []
+        for pos in decision.positions:
+            # --- Min hold check: block CLOSE if position too young ---
+            if pos.action == "CLOSE" and pos.ticker in binance_held_tickers:
+                open_time = self._position_open_times.get(pos.ticker)
+                if open_time is not None:
+                    held_min = (now_dt - open_time).total_seconds() / 60
+                    if held_min < min_hold_min:
+                        logger.info(
+                            f"Anti-churn: blocking CLOSE {pos.ticker} "
+                            f"(held {held_min:.0f}min < {min_hold_min}min). Forcing HOLD."
+                        )
+                        pos = PositionDecision(
+                            ticker=pos.ticker, action="HOLD",
+                            weight=pos.weight,
+                            stop_loss_pct=pos.stop_loss_pct, take_profit_pct=pos.take_profit_pct,
+                            reasoning=f"Anti-churn HOLD (held {held_min:.0f}min)",
+                        )
+                        filtered_positions.append(pos)
+                        continue
+
+            # --- Defensive emergency exit: override HOLD if filters scream danger ---
+            if pos.action == "HOLD" and pos.ticker in defensive_scores:
+                defenses = defensive_scores[pos.ticker]
+                managed_mp = managed_lookup.get(pos.ticker)
+                if managed_mp and defenses:
+                    is_long = managed_mp.side == "LONG"
+                    # Count how many filters strongly oppose the position direction
+                    danger_count = 0
+                    for d_score in defenses.values():
+                        if is_long and d_score < -0.5:
+                            danger_count += 1
+                        elif not is_long and d_score > 0.5:
+                            danger_count += 1
+                    if danger_count >= 2:
+                        logger.warning(
+                            f"DEFENSIVE EXIT: {pos.ticker} — {danger_count} filters "
+                            f"strongly opposing {managed_mp.side}. Forcing CLOSE."
+                        )
+                        pos = PositionDecision(
+                            ticker=pos.ticker, action="CLOSE",
+                            weight=0.0,
+                            stop_loss_pct=pos.stop_loss_pct, take_profit_pct=pos.take_profit_pct,
+                            reasoning=f"Defensive exit: {danger_count} filters opposing",
+                        )
+                        filtered_positions.append(pos)
+                        continue
+
+            # --- Cooldown check: block re-entry after recent close ---
+            cooldowns = getattr(self, "_close_cooldowns", {})
+            if pos.action in ("LONG", "SHORT") and pos.ticker in cooldowns:
+                closed_at = cooldowns[pos.ticker]
+                cooldown_elapsed = (now_dt - closed_at).total_seconds() / 60
+                if cooldown_elapsed < cooldown_min:
+                    logger.info(
+                        f"Anti-churn: blocking {pos.action} {pos.ticker} "
+                        f"(closed {cooldown_elapsed:.0f}min ago < {cooldown_min}min cooldown)"
+                    )
+                    continue
+
+            # --- Suppressed ticker block: never open new positions on suppressed tickers ---
+            if pos.action in ("LONG", "SHORT") and pos.ticker in suppressed_tickers:
+                if pos.ticker not in binance_held_tickers:
+                    logger.info(
+                        f"Blocking new {pos.action} on suppressed ticker "
+                        f"{pos.ticker.replace('/USDT:USDT', '')} — defensive filters oppose entry"
+                    )
+                    continue
+
+            # --- Signal gate: volume surge + liquidity filter for NEW entries ---
+            if (
+                signal_gate_enabled
+                and pos.action in ("LONG", "SHORT")
+                and pos.ticker not in binance_held_tickers
+            ):
+                recent_bars = int(signal_gate_cfg.get("recent_volume_bars", 3))
+                baseline_bars = int(signal_gate_cfg.get("baseline_volume_bars", 36))
+                min_surge = float(signal_gate_cfg.get("volume_surge_min_ratio", 1.20))
+                min_quote_vol = float(signal_gate_cfg.get("min_quote_volume_usdt", 0.0))
+
+                surge_ratio = self._get_volume_surge_ratio(
+                    pos.ticker,
+                    recent_bars=recent_bars,
+                    baseline_bars=baseline_bars,
+                )
+                quote_vol_24h = float(quote_volumes_24h.get(pos.ticker, 0.0))
+
+                blocked_reasons = []
+                if surge_ratio is not None and surge_ratio < min_surge:
+                    blocked_reasons.append(
+                        f"volume surge {surge_ratio:.2f} < {min_surge:.2f}"
+                    )
+                if quote_vol_24h > 0 and quote_vol_24h < min_quote_vol:
+                    blocked_reasons.append(
+                        f"24h quote vol ${quote_vol_24h:,.0f} < ${min_quote_vol:,.0f}"
+                    )
+
+                if blocked_reasons:
+                    logger.info(
+                        f"Signal gate blocked new {pos.action} "
+                        f"{pos.ticker.replace('/USDT:USDT', '')}: "
+                        + " | ".join(blocked_reasons)
+                    )
+                    continue
+
+            # --- Same-ticker re-entry block: if Sonnet wants to CLOSE then re-OPEN same ticker ---
+            if pos.action in ("LONG", "SHORT") and pos.ticker in binance_held_tickers:
+                # Already holding this ticker — check if Sonnet also issued CLOSE for it
+                close_in_batch = any(
+                    p.action == "CLOSE" and p.ticker == pos.ticker
+                    for p in decision.positions
+                )
+                if close_in_batch:
+                    logger.info(
+                        f"Anti-churn: blocking same-cycle CLOSE+{pos.action} for {pos.ticker}. "
+                        f"Converting to HOLD."
+                    )
+                    pos = PositionDecision(
+                        ticker=pos.ticker, action="HOLD",
+                        weight=pos.weight,
+                        stop_loss_pct=pos.stop_loss_pct, take_profit_pct=pos.take_profit_pct,
+                        reasoning=f"Anti-churn: blocked same-cycle flip",
+                    )
+                    filtered_positions.append(pos)
+                    continue
+
+            filtered_positions.append(pos)
+
+        decision.positions = filtered_positions
+
         # -- Step 6: Convert to target weights + execute --
         target_weights = {}
         leverage_per_symbol = {}
@@ -597,8 +1427,45 @@ class UnifiedDaemon:
                 target_weights[pos.ticker] = 0.0
             # HOLD → don't change
 
-            leverage_per_symbol[pos.ticker] = TRADING.get("max_leverage", 2.0)
+            if pos.action in ("LONG", "SHORT", "CLOSE"):
+                leverage_per_symbol[pos.ticker] = TRADING.get("max_leverage", 3.0)
 
+        # -- Step 6.5: No-trade zone — suppress switches with insufficient edge --
+        current_positions_map = {
+            p["symbol"]: p for p in self.rebalancer._get_current_positions()
+        }
+        positions_to_remove = []
+        for ticker, weight in list(target_weights.items()):
+            if weight == 0.0 or ticker in current_positions_map:
+                continue  # CLOSE or already holding — pass through
+
+            # New entry: check if we're closing something to make room
+            closes = [
+                t for t, w in target_weights.items()
+                if w == 0.0 and t in current_positions_map
+            ]
+            if not closes:
+                continue  # Free slot, OK
+
+            new_score = aggregated.scores.get(ticker, 0)
+            for closed_ticker in closes:
+                old_score = aggregated.scores.get(closed_ticker, 0)
+                score_improvement = abs(new_score) - abs(old_score)
+                min_edge = max(0.05, abs(old_score) * 0.10)
+                if score_improvement < min_edge:
+                    logger.info(
+                        f"No-trade zone: blocking {ticker} (score {new_score:.3f}) "
+                        f"replacing {closed_ticker} (score {old_score:.3f}), "
+                        f"improvement {score_improvement:.3f} < {min_edge:.3f}"
+                    )
+                    positions_to_remove.append(ticker)
+                    positions_to_remove.append(closed_ticker)
+                    break
+
+        for t in set(positions_to_remove):
+            target_weights.pop(t, None)
+
+        executed = []
         if target_weights:
             logger.info(f"Executing: {len(target_weights)} target positions")
             executed = self.rebalancer.rebalance(
@@ -633,11 +1500,27 @@ class UnifiedDaemon:
 
         for pos in decision.positions:
             if pos.action in ("LONG", "SHORT"):
+                # Check if we already have the same-direction position
+                # Sonnet sometimes outputs SHORT instead of HOLD for existing shorts
+                existing = self.position_store.positions.get(pos.ticker)
+                if existing and existing.side == pos.action:
+                    # Already holding same direction — treat as HOLD, don't update
+                    logger.info(
+                        f"Ignoring duplicate {pos.action} for {pos.ticker} "
+                        f"(already holding {existing.side} @ {existing.entry_price:.4f})"
+                    )
+                    continue
+
                 try:
-                    # Prefer actual fill price from executed order, fallback to market price
+                    # Only store position if order was actually filled
                     price = fill_prices.get(pos.ticker, 0)
                     if price <= 0:
-                        price = self.binance_api.get_price(pos.ticker)
+                        # No fill price = order failed or wasn't executed
+                        logger.warning(
+                            f"Skipping position store for {pos.ticker}: "
+                            f"no fill price (order likely failed)"
+                        )
+                        continue
                     if price > 0:
                         self.position_store.upsert(
                             ticker=pos.ticker,
@@ -648,12 +1531,135 @@ class UnifiedDaemon:
                             take_profit_pct=pos.take_profit_pct,
                             reasoning=pos.reasoning,
                         )
+                        # Track open time for anti-churn
+                        if not hasattr(self, "_position_open_times"):
+                            self._position_open_times = {}
+                        self._position_open_times[pos.ticker] = datetime.now()
                 except Exception as e:
                     logger.error(f"Failed to store position {pos.ticker}: {e}")
+            elif pos.action == "HOLD":
+                # SL/TP are set once at entry and never changed on HOLD.
+                # Sonnet returns slightly different SL/TP each cycle, causing
+                # dangerous drift (e.g., SL widening from -5% to -8%).
+                pass
             elif pos.action == "CLOSE":
                 self.position_store.remove(pos.ticker, reason="sonnet_close")
+                # Record cooldown timestamp
+                if not hasattr(self, "_close_cooldowns"):
+                    self._close_cooldowns = {}
+                self._close_cooldowns[pos.ticker] = datetime.now()
+                # Clean up open time tracking
+                if hasattr(self, "_position_open_times"):
+                    self._position_open_times.pop(pos.ticker, None)
 
         logger.info(f"{'='*40} CYCLE END {'='*40}")
+
+    def _inject_hold_for_orphans(
+        self, decision: SonnetDecision, managed: list | None
+    ) -> SonnetDecision:
+        """
+        Safety net: if Sonnet omitted an existing managed position,
+        auto-inject a HOLD decision so it doesn't become unmanaged.
+
+        This prevents positions from staying open indefinitely when the
+        LLM simply forgets to mention them in its response.
+        """
+        if not managed:
+            return decision
+
+        # Tickers that Sonnet already addressed
+        decided_tickers = {p.ticker for p in decision.positions}
+
+        orphans = [mp for mp in managed if mp.ticker not in decided_tickers]
+
+        for mp in orphans:
+            logger.warning(
+                f"Orphan position detected: {mp.ticker} {mp.side} "
+                f"not in Sonnet decision — auto-injecting HOLD"
+            )
+            decision.positions.append(
+                PositionDecision(
+                    ticker=mp.ticker,
+                    action="HOLD",
+                    weight=mp.target_weight,
+                    stop_loss_pct=mp.stop_loss_pct,
+                    take_profit_pct=mp.take_profit_pct,
+                    reasoning=f"[AUTO-HOLD] Sonnet omitted this position",
+                )
+            )
+
+        if orphans:
+            self.telegram.send_message(
+                f"<b>Orphan Safety Net</b>\n"
+                f"Sonnet이 {len(orphans)}개 기존 포지션을 누락하여 "
+                f"자동 HOLD 처리함:\n"
+                + "\n".join(
+                    f"  {mp.ticker} {mp.side}" for mp in orphans
+                )
+            )
+
+        return decision
+
+    def _sync_position_store(self, current_positions: pd.DataFrame) -> None:
+        """
+        Remove ghost entries from managed_positions that don't exist on Binance.
+
+        Called every rebalance cycle to prevent managed_positions.json from
+        accumulating stale entries that block new position entries.
+
+        IMPORTANT: Only syncs when Binance API returned valid data (non-empty).
+        If current_positions is empty, we can't distinguish "no positions" from
+        "API call failed" — so we skip the sync to avoid removing real positions.
+        """
+        if not self.position_store:
+            return
+
+        managed = self.position_store.get_active()
+        if not managed:
+            return
+
+        # Guard: skip sync only if API actually failed (returned None)
+        if current_positions is None:
+            logger.debug(
+                "Ghost sync skipped: Binance API failed. "
+                "Keeping managed entries intact."
+            )
+            return
+
+        # Build set of tickers that actually have positions on Binance
+        actual_tickers: set[str] = set()
+        for _, row in current_positions.iterrows():
+            size = abs(float(row.get("size", 0)))
+            if size > 0:
+                actual_tickers.add(row.get("ticker", ""))
+
+        # No actual positions on Binance (API succeeded but no open positions)
+        if not actual_tickers:
+            # Binance responded with position rows (API worked) but all sizes are 0
+            removed = []
+            for mp in managed:
+                self.position_store.remove(mp.ticker, reason="ghost_sync")
+                removed.append(mp.ticker)
+            if removed:
+                logger.warning(
+                    f"Ghost position sync: removed {len(removed)} stale entries "
+                    f"(Binance confirms no open positions): "
+                    f"{', '.join(t.replace('/USDT:USDT', '') for t in removed)}"
+                )
+            return
+
+        # Normal case: Binance has some positions — remove managed entries not on Binance
+        removed = []
+        for mp in managed:
+            if mp.ticker not in actual_tickers:
+                self.position_store.remove(mp.ticker, reason="ghost_sync")
+                removed.append(mp.ticker)
+
+        if removed:
+            logger.warning(
+                f"Ghost position sync: removed {len(removed)} stale entries: "
+                f"{', '.join(t.replace('/USDT:USDT', '') for t in removed)}"
+            )
 
     def _build_market_context(self) -> dict:
         """Build market context dict for Sonnet prompt."""
@@ -661,7 +1667,7 @@ class UnifiedDaemon:
 
         try:
             btc_data = self._prices[
-                self._prices["ticker"].str.contains("BTC", case=False)
+                self._prices["ticker"].str.startswith("BTC/")
             ].sort_values("date")
             close = btc_data["close"].values
 
@@ -675,6 +1681,27 @@ class UnifiedDaemon:
         except Exception as e:
             logger.warning(f"Market context build failed: {e}")
             ctx = {"regime": regime, "btc_price": 0, "btc_24h_change": 0, "btc_7d_change": 0, "btc_30d_change": 0}
+
+        # Add ETH data and breadth from regime detection
+        try:
+            eth_data = self._prices[
+                self._prices["ticker"].str.startswith("ETH/")
+            ].sort_values("date")
+            eth_close = eth_data["close"].values
+
+            ctx["eth_price"] = float(eth_close[-1]) if len(eth_close) > 0 else 0
+            ctx["eth_24h_change"] = float(eth_close[-1] / eth_close[-2] - 1) if len(eth_close) > 1 else 0
+            ctx["eth_7d_change"] = float(eth_close[-1] / eth_close[-7] - 1) if len(eth_close) > 7 else 0
+            ctx["eth_30d_change"] = float(eth_close[-1] / eth_close[-30] - 1) if len(eth_close) > 30 else 0
+        except Exception as e:
+            logger.debug(f"ETH context failed: {e}")
+            ctx.update({"eth_price": 0, "eth_24h_change": 0, "eth_7d_change": 0, "eth_30d_change": 0})
+
+        # Breadth data from _detect_regime()
+        regime_details = getattr(self, "_regime_details", {})
+        ctx["pct_above_ma20"] = regime_details.get("pct_above_ma20", 0.5)
+        ctx["adv_decline_ratio"] = regime_details.get("adv_decline_ratio", 1.0)
+        ctx["regime_score"] = regime_details.get("regime_score", 0)
 
         # Add current funding rates for held/candidate tickers
         try:
@@ -690,20 +1717,146 @@ class UnifiedDaemon:
             logger.warning(f"Funding rates context failed: {e}")
             ctx["funding_rates"] = {}
 
+        # Add derivatives sentiment (OI + Long/Short ratio) for top 10 symbols
+        try:
+            top_symbols = self._universe[:10] if self._universe else []
+            if top_symbols:
+                ctx["open_interest"] = self.binance_api.get_open_interest_batch(top_symbols)
+                ctx["long_short_ratio"] = self.binance_api.get_long_short_ratio_batch(top_symbols)
+            else:
+                ctx["open_interest"] = {}
+                ctx["long_short_ratio"] = {}
+        except Exception as e:
+            logger.warning(f"Derivatives sentiment fetch failed: {e}")
+            ctx["open_interest"] = {}
+            ctx["long_short_ratio"] = {}
+
         return ctx
+
+    def _get_volume_surge_ratio(
+        self,
+        ticker: str,
+        recent_bars: int = 3,
+        baseline_bars: int = 36,
+    ) -> float | None:
+        """
+        Compute recent/baseline volume ratio from 5m candles.
+
+        Returns None when data is insufficient.
+        """
+        if self._prices_5m is None or self._prices_5m.empty:
+            return None
+        if recent_bars <= 0 or baseline_bars <= 0:
+            return None
+
+        time_col = "datetime" if "datetime" in self._prices_5m.columns else "date"
+        tkr = (
+            self._prices_5m[self._prices_5m["ticker"] == ticker]
+            .sort_values(time_col)
+            .tail(recent_bars + baseline_bars)
+        )
+        if len(tkr) < (recent_bars + baseline_bars):
+            return None
+
+        vols = pd.to_numeric(tkr["volume"], errors="coerce").dropna()
+        if len(vols) < (recent_bars + baseline_bars):
+            return None
+
+        recent_mean = float(vols.tail(recent_bars).mean())
+        baseline_series = vols.head(len(vols) - recent_bars).tail(baseline_bars)
+        if baseline_series.empty:
+            return None
+
+        baseline_median = float(baseline_series.median())
+        if baseline_median <= 0:
+            return None
+
+        return recent_mean / baseline_median
+
+    def _build_features_summary(self) -> dict:
+        """Extract per-ticker price/vol/RSI summary from daily OHLCV for Sonnet context."""
+        summary = {}
+        try:
+            if self._prices is None or self._prices.empty:
+                return summary
+
+            import numpy as np
+
+            for ticker, grp in self._prices.groupby("ticker"):
+                grp = grp.sort_values("date")
+                if len(grp) < 21:
+                    continue
+                closes = grp["close"].values
+                price = float(closes[-1])
+                ret_1d = float(closes[-1] / closes[-2] - 1) if len(closes) > 1 else 0.0
+
+                # Annualized volatility
+                log_rets = np.diff(np.log(closes[-21:]))  # last 20 days
+                vol_20d = float(np.std(log_rets) * np.sqrt(252)) if len(log_rets) > 1 else 0.0
+                log_rets_5 = np.diff(np.log(closes[-6:]))  # last 5 days
+                vol_5d = float(np.std(log_rets_5) * np.sqrt(252)) if len(log_rets_5) > 1 else 0.0
+
+                # RSI 14
+                deltas = np.diff(closes[-15:])
+                gains = np.where(deltas > 0, deltas, 0)
+                losses_arr = np.where(deltas < 0, -deltas, 0)
+                avg_gain = float(np.mean(gains)) if len(gains) > 0 else 0
+                avg_loss = float(np.mean(losses_arr)) if len(losses_arr) > 0 else 0
+                if avg_loss == 0:
+                    rsi = 100.0
+                else:
+                    rs = avg_gain / avg_loss
+                    rsi = 100.0 - (100.0 / (1 + rs))
+
+                summary[str(ticker)] = {
+                    "price": price,
+                    "ret_1d": ret_1d,
+                    "vol_5d": vol_5d,
+                    "vol_20d": vol_20d,
+                    "rsi_14": rsi,
+                }
+        except Exception as e:
+            logger.warning(f"Features summary build failed: {e}")
+
+        return summary
+
+    def _translate_to_korean(self, text: str) -> str:
+        """Translate English text to Korean using Haiku for speed."""
+        try:
+            resp = self.anthropic_client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "다음 트레이딩 분석을 자연스러운 한국어로 번역해줘. "
+                        "전문 용어(RSI, SL, TP, 롱, 숏 등)는 그대로 유지. "
+                        "간결하게 번역하고, 원문의 의미를 정확히 전달해.\n\n"
+                        f"{text}"
+                    ),
+                }],
+            )
+            return resp.content[0].text.strip()
+        except Exception as e:
+            logger.warning(f"Translation failed, using original: {e}")
+            return text
 
     def _format_sonnet_proposal(self, decision: SonnetDecision, balance: float) -> str:
         """Format Sonnet's decision as a Telegram message (Korean)."""
         action_kr = {
-            "LONG": "롱 진입",
-            "SHORT": "숏 진입",
-            "CLOSE": "청산",
-            "HOLD": "유지",
+            "LONG": "🟢 롱 진입",
+            "SHORT": "🔴 숏 진입",
+            "CLOSE": "⚪ 청산",
+            "HOLD": "🔵 유지",
         }
 
+        # Translate Sonnet's English fields to Korean
+        market_kr = self._translate_to_korean(decision.market_assessment)
+        risk_kr = self._translate_to_korean(decision.risk_note) if decision.risk_note else ""
+
         lines = [
-            "<b>AI 매매 결정</b>",
-            f"시장: {decision.market_assessment}",
+            "<b>📊 AI 매매 결정</b>",
+            f"시장: {market_kr}",
             f"잔고: ${balance:.2f}",
             "",
         ]
@@ -711,16 +1864,79 @@ class UnifiedDaemon:
         for p in decision.positions:
             short_ticker = p.ticker.replace("/USDT:USDT", "")
             action_text = action_kr.get(p.action, p.action)
+            reasoning_kr = self._translate_to_korean(p.reasoning)
 
+            lines.append(f"  {action_text} {short_ticker} {p.weight:.0%}")
+            if p.action in ("LONG", "SHORT"):
+                lines.append(f"    손절: {p.stop_loss_pct:+.1%} | 익절: {p.take_profit_pct:+.1%}")
+            lines.append(f"    {reasoning_kr}")
+
+        if risk_kr:
+            lines.append(f"\n⚠️ 위험: {risk_kr}")
+
+        return "\n".join(lines)
+
+    def _format_rule_proposal(self, decision, balance: float) -> str:
+        """규칙 기반 결정을 텔레그램 메시지로 포맷."""
+        action_kr = {
+            "LONG": "🟢 롱 진입",
+            "SHORT": "🔴 숏 진입",
+            "CLOSE": "⚪ 청산",
+            "HOLD": "🔵 유지",
+        }
+        lines = [
+            "<b>📊 매매 결정 (규칙 기반)</b>",
+            f"잔고: ${balance:.2f}",
+            "",
+        ]
+        for p in decision.positions:
+            short_ticker = p.ticker.replace("/USDT:USDT", "")
+            action_text = action_kr.get(p.action, p.action)
             lines.append(f"  {action_text} {short_ticker} {p.weight:.0%}")
             if p.action in ("LONG", "SHORT"):
                 lines.append(f"    손절: {p.stop_loss_pct:+.1%} | 익절: {p.take_profit_pct:+.1%}")
             lines.append(f"    {p.reasoning}")
 
         if decision.risk_note:
-            lines.append(f"\n위험: {decision.risk_note}")
+            lines.append(f"\n⚠️ {decision.risk_note}")
 
         return "\n".join(lines)
+
+    def _get_telegram_notifier(self):
+        """TelegramNotifier 인스턴스 반환 (없으면 None)."""
+        if hasattr(self, "_tg_notifier"):
+            return self._tg_notifier
+        try:
+            from src.daemon.telegram_notifier import TelegramNotifier
+            keys = self.keys or {}
+            tg_cfg = keys.get("telegram", {})
+            bot_token = tg_cfg.get("bot_token", "")
+            chat_id = str(tg_cfg.get("chat_id", ""))
+            if not bot_token or not chat_id:
+                # broadcast_chat_ids 사용
+                chat_ids = tg_cfg.get("broadcast_chat_ids", [])
+                if chat_ids:
+                    chat_id = str(chat_ids[0])
+            if bot_token and chat_id:
+                self._tg_notifier = TelegramNotifier(
+                    bot_token=bot_token, chat_id=chat_id
+                )
+                return self._tg_notifier
+        except Exception as e:
+            logger.debug(f"TelegramNotifier init failed: {e}")
+        self._tg_notifier = None
+        return None
+
+    def _get_current_price(self, ticker: str) -> float:
+        """티커의 현재 가격 반환."""
+        try:
+            if self._prices is not None and not self._prices.empty:
+                tkr = self._prices[self._prices["ticker"] == ticker].sort_values("date")
+                if not tkr.empty:
+                    return float(tkr["close"].iloc[-1])
+        except Exception:
+            pass
+        return 0.0
 
     # ==================================================================
     # Signal Collection
@@ -738,10 +1954,25 @@ class UnifiedDaemon:
         alpha_signals: dict[str, pd.DataFrame] = {}
         alpha_entries = []
 
+        # Intraday alpha names and their data sources
+        _HOURLY_ALPHAS = {"IntradayRSI", "IntradayVWAP"}
+        _FIVE_MIN_ALPHAS = {"IntradayTimeSeriesMomentum"}
+
         # Source 1: Base alphas
         for name, alpha in self._base_alphas.items():
             try:
-                result = alpha.generate_signals(now, self._prices, self._features)
+                if name in _FIVE_MIN_ALPHAS:
+                    if self._prices_5m is None:
+                        logger.warning(f"Skipping {name}: 5m data not available")
+                        continue
+                    result = alpha.generate_signals(now, self._prices_5m, self._features)
+                elif name in _HOURLY_ALPHAS:
+                    if self._prices_1h is None:
+                        logger.warning(f"Skipping {name}: 1h data not available")
+                        continue
+                    result = alpha.generate_signals(now, self._prices_1h, self._features)
+                else:
+                    result = alpha.generate_signals(now, self._prices, self._features)
                 if result and not result.signals.empty:
                     alpha_signals[name] = result.signals
             except Exception as e:
@@ -819,9 +2050,21 @@ class UnifiedDaemon:
         weights = self._config_weights_with_regime(alpha_signals)
         return weights
 
+    @staticmethod
+    def _classify_asset(ret_7d: float, ret_20d: float) -> str:
+        """Classify a single asset's trend as bull/bear/sideways."""
+        if ret_7d > 0.03 and ret_20d > 0.05:
+            return "bull"
+        elif ret_7d < -0.03 and ret_20d < -0.05:
+            return "bear"
+        return "sideways"
+
     def _detect_regime(self) -> str:
         """
-        Simple regime detection from BTC price data.
+        Multi-signal regime detection using BTC + ETH + market breadth.
+
+        Scoring: BTC (±2), ETH (±1), breadth (±1)
+        bull >= +3, bear <= -3, else sideways
 
         Returns: 'bull', 'bear', or 'sideways'
         """
@@ -829,32 +2072,100 @@ class UnifiedDaemon:
             if self._prices is None or self._prices.empty:
                 return "sideways"
 
-            # Use BTC as market proxy
+            score = 0
+            signal_map = {"bull": 1, "bear": -1, "sideways": 0}
+            details = {}
+
+            # --- BTC signal (weight: 2) ---
             btc_data = self._prices[
-                self._prices["ticker"].str.contains("BTC", case=False)
+                self._prices["ticker"].str.startswith("BTC/")
             ].sort_values("date")
 
-            if len(btc_data) < 30:
-                return "sideways"
+            if len(btc_data) >= 10:
+                btc_close = btc_data["close"].values
+                btc_ret_7d = (btc_close[-1] / btc_close[-7] - 1) if len(btc_close) >= 7 else 0
+                btc_ret_20d = (btc_close[-1] / btc_close[-20] - 1) if len(btc_close) >= 20 else 0
+                btc_signal = self._classify_asset(btc_ret_7d, btc_ret_20d)
+                score += signal_map[btc_signal] * 2
+                details["BTC"] = f"{btc_ret_7d:+.1%}/{btc_ret_20d:+.1%}→{btc_signal}"
+            else:
+                btc_ret_7d = btc_ret_20d = 0
 
-            close = btc_data["close"].values
+            # --- ETH signal (weight: 1) ---
+            eth_data = self._prices[
+                self._prices["ticker"].str.startswith("ETH/")
+            ].sort_values("date")
 
-            # 20-day return
-            ret_20d = (close[-1] / close[-20] - 1) if len(close) >= 20 else 0
-            # 60-day return
-            ret_60d = (close[-1] / close[-60] - 1) if len(close) >= 60 else 0
+            eth_ret_7d = eth_ret_20d = 0
+            if len(eth_data) >= 10:
+                eth_close = eth_data["close"].values
+                eth_ret_7d = (eth_close[-1] / eth_close[-7] - 1) if len(eth_close) >= 7 else 0
+                eth_ret_20d = (eth_close[-1] / eth_close[-20] - 1) if len(eth_close) >= 20 else 0
+                eth_signal = self._classify_asset(eth_ret_7d, eth_ret_20d)
+                score += signal_map[eth_signal]
+                details["ETH"] = f"{eth_ret_7d:+.1%}/{eth_ret_20d:+.1%}→{eth_signal}"
 
-            # Regime thresholds
-            if ret_20d > 0.05 and ret_60d > 0.10:
+            # --- Market breadth (weight: 1) ---
+            pct_above_ma20 = 0.5
+            adv_decline = 1.0
+            try:
+                latest_date = self._prices["date"].max()
+                latest = self._prices[self._prices["date"] == latest_date].copy()
+                if len(latest) > 5:
+                    # pct above MA20
+                    for ticker, grp in self._prices.groupby("ticker"):
+                        grp = grp.sort_values("date")
+                        if len(grp) >= 20:
+                            ma20 = grp["close"].rolling(20).mean().iloc[-1]
+                            last_close = grp["close"].iloc[-1]
+                            latest.loc[latest["ticker"] == ticker, "_above_ma20"] = int(last_close > ma20)
+
+                    if "_above_ma20" in latest.columns:
+                        pct_above_ma20 = latest["_above_ma20"].mean()
+
+                    # advance/decline ratio (1-day returns)
+                    prev_date = self._prices["date"].unique()
+                    prev_date = sorted(prev_date)
+                    if len(prev_date) >= 2:
+                        prev = self._prices[self._prices["date"] == prev_date[-2]]
+                        merged = latest[["ticker", "close"]].merge(
+                            prev[["ticker", "close"]], on="ticker", suffixes=("", "_prev")
+                        )
+                        if len(merged) > 0:
+                            rets = merged["close"] / merged["close_prev"] - 1
+                            n_adv = (rets > 0).sum()
+                            n_dec = (rets < 0).sum()
+                            adv_decline = n_adv / max(n_dec, 1)
+
+                if pct_above_ma20 > 0.65:
+                    score += 1
+                elif pct_above_ma20 < 0.35:
+                    score -= 1
+                details["breadth"] = f"{pct_above_ma20:.0%} above MA20, A/D={adv_decline:.2f}"
+            except Exception as e:
+                logger.debug(f"Breadth calculation failed: {e}")
+
+            # --- Final regime ---
+            if score >= 3:
                 regime = "bull"
-            elif ret_20d < -0.05 and ret_60d < -0.10:
+            elif score <= -3:
                 regime = "bear"
             else:
                 regime = "sideways"
 
-            logger.info(
-                f"Regime: {regime} (BTC 20d: {ret_20d:+.1%}, 60d: {ret_60d:+.1%})"
-            )
+            # Store for market_context
+            self._regime_details = {
+                "btc_ret_7d": btc_ret_7d,
+                "btc_ret_20d": btc_ret_20d,
+                "eth_ret_7d": eth_ret_7d,
+                "eth_ret_20d": eth_ret_20d,
+                "pct_above_ma20": pct_above_ma20,
+                "adv_decline_ratio": adv_decline,
+                "regime_score": score,
+            }
+
+            detail_str = ", ".join(f"{k}: {v}" for k, v in details.items())
+            logger.info(f"Regime: {regime} (score={score:+d}, {detail_str})")
             return regime
 
         except Exception as e:
@@ -864,12 +2175,15 @@ class UnifiedDaemon:
     # Map alpha.name (class name) → config key (snake_case)
     _ALPHA_NAME_TO_CONFIG = {
         "CSMomentum": "cs_momentum",
-        "TimeSeriesMomentum": "ts_momentum",
-        "TimeSeriesMeanReversion": "ts_mean_reversion",
+        "TimeSeriesMomentum": "time_series_momentum",
+        "TimeSeriesMeanReversion": "time_series_mean_reversion",
         "PriceVolumeDivergence": "pv_divergence",
         "VolumeMomentum": "volume_momentum",
         "LowVolatilityAnomaly": "low_volatility_anomaly",
         "FundingRateCarry": "funding_rate_carry",
+        "IntradayRSI": "intraday_rsi",
+        "IntradayTimeSeriesMomentum": "intraday_time_series_momentum",
+        "IntradayVWAP": "intraday_vwap",
     }
 
     def _config_weights_with_regime(

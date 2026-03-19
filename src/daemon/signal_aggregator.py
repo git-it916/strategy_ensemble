@@ -8,6 +8,7 @@ tracking each alpha's contribution to the final score for transparency.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -64,6 +65,8 @@ class SignalAggregator:
             for _, row in signals_df.iterrows():
                 ticker = row["ticker"]
                 raw_score = float(row.get("score", 0))
+                if math.isnan(raw_score):
+                    continue
                 contribution = raw_score * weight
 
                 combined[ticker] = combined.get(ticker, 0.0) + contribution

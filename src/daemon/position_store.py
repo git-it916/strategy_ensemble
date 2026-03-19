@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import deque
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,18 @@ class ManagedPosition:
     status: str = "active"     # active, stopped_out, took_profit, closed
 
 
+@dataclass
+class ClosedPosition:
+    """Record of a recently closed position for Sonnet context."""
+    ticker: str
+    side: str
+    entry_price: float
+    entry_time: str
+    close_time: str
+    close_reason: str          # "closed", "stopped_out", "took_profit"
+    unrealized_pnl: float = 0.0
+
+
 class PositionStore:
     """
     Persist and manage position metadata with SL/TP levels.
@@ -40,9 +53,12 @@ class PositionStore:
     Stores to a JSON file for crash recovery.
     """
 
+    _MAX_CLOSED_HISTORY = 20
+
     def __init__(self, path: Path | str):
         self.path = Path(path)
         self.positions: dict[str, ManagedPosition] = {}
+        self._closed_history: deque[ClosedPosition] = deque(maxlen=self._MAX_CLOSED_HISTORY)
         self._load()
 
     def upsert(
@@ -90,11 +106,18 @@ class PositionStore:
         return pos
 
     def remove(self, ticker: str, reason: str = "closed") -> None:
-        """Remove a position (mark as closed)."""
+        """Remove a position and record it in closed history."""
         if ticker in self.positions:
-            self.positions[ticker].status = reason
+            pos = self.positions[ticker]
+            self._closed_history.append(ClosedPosition(
+                ticker=pos.ticker,
+                side=pos.side,
+                entry_price=pos.entry_price,
+                entry_time=pos.entry_time,
+                close_time=datetime.now().isoformat(),
+                close_reason=reason,
+            ))
             logger.info(f"Position removed: {ticker} ({reason})")
-            self._save()
             del self.positions[ticker]
             self._save()
 
@@ -102,11 +125,18 @@ class PositionStore:
         """Get all active positions."""
         return [p for p in self.positions.values() if p.status == "active"]
 
-    def get_recently_closed(self, minutes: int = 30) -> list[ManagedPosition]:
+    def get_recently_closed(self, minutes: int = 60) -> list[ClosedPosition]:
         """Get positions closed in the last N minutes (for Sonnet context)."""
-        # Currently not tracking closed positions separately.
-        # Could be extended with a history list.
-        return []
+        now = datetime.now()
+        result = []
+        for cp in self._closed_history:
+            try:
+                closed_at = datetime.fromisoformat(cp.close_time)
+                if (now - closed_at).total_seconds() <= minutes * 60:
+                    result.append(cp)
+            except (ValueError, TypeError):
+                continue
+        return result
 
     def _load(self) -> None:
         """Load positions from JSON file."""

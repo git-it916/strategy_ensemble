@@ -11,6 +11,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
+from config.settings import GATES, TRADING
 from src.openclaw.config import ASSETS, EXECUTION_POLICY
 
 logger = logging.getLogger(__name__)
@@ -57,14 +58,20 @@ class Rebalancer:
 
         current_positions = self._get_current_positions()
 
-        # 2. Compute current weights and build position size lookup
+        # 2. Compute current weights as signed margin weights
+        # target_weights: LONG = +weight, SHORT = -weight, CLOSE = 0
+        # current_weights must match: LONG = +margin_weight, SHORT = -margin_weight
         current_weights = {}
         position_sizes = {}  # {symbol: {"size": float, "side": str}}
         for pos in current_positions:
             symbol = pos["symbol"]
             notional = abs(pos.get("notional", 0))
-            if total_capital > 0:
-                current_weights[symbol] = notional / total_capital
+            side = pos.get("side", "long").lower()
+            leverage = leverage_per_symbol.get(symbol, 3.0)
+            if total_capital > 0 and leverage > 0:
+                margin_weight = notional / (total_capital * leverage)
+                # Sign: negative for short positions
+                current_weights[symbol] = margin_weight if side == "long" else -margin_weight
             position_sizes[symbol] = {
                 "size": pos.get("size", 0),
                 "side": pos.get("side", "long"),
@@ -79,23 +86,33 @@ class Rebalancer:
             current_w = current_weights.get(symbol, 0.0)
             diff = target_w - current_w
 
-            # Skip small diffs
-            if abs(diff) < EXECUTION_POLICY.rebalance_threshold:
-                continue
-
+            # Cost-aware no-trade zone
             leverage = leverage_per_symbol.get(symbol, 1.0)
+            commission_bps = float(TRADING.get("commission_bps", 4.0))
+            slippage_bps = float(TRADING.get("slippage_bps", 5.0))
+            round_trip_cost_pct = (commission_bps + slippage_bps) * 2 / 10000
+            cost_as_margin_pct = round_trip_cost_pct * leverage
+            min_diff = max(EXECUTION_POLICY.rebalance_threshold, cost_as_margin_pct * 2.0)
+            if abs(diff) < min_diff:
+                continue
             # notional = margin * leverage (actual position size)
             target_notional = diff * total_capital * leverage
 
             # Determine if this is reducing/closing an existing position
+            # For LONG: closing means diff < 0 (selling), reducing means partial sell
+            # For SHORT: closing means diff > 0 (buying back), reducing means partial buy
+            is_moving_toward_zero = (
+                (current_w > 0 and diff < 0) or  # LONG being reduced/closed
+                (current_w < 0 and diff > 0)      # SHORT being reduced/closed
+            )
             is_closing = (
                 symbol in position_sizes
-                and diff < 0
-                and target_w <= EXECUTION_POLICY.rebalance_threshold
+                and is_moving_toward_zero
+                and abs(target_w) <= EXECUTION_POLICY.rebalance_threshold
             )
             is_reducing = (
                 symbol in position_sizes
-                and diff < 0
+                and is_moving_toward_zero
                 and not is_closing
             )
 
@@ -142,10 +159,7 @@ class Rebalancer:
         """Get total USDT balance from Binance."""
         try:
             account = self.api.get_account()
-            for asset in account.get("assets", []):
-                if asset.get("asset") == "USDT":
-                    return float(asset.get("walletBalance", 0))
-            return 0.0
+            return float(account.get("total_wallet_balance", 0))
         except Exception as e:
             logger.error(f"Failed to get account balance: {e}")
             return 0.0
@@ -187,6 +201,57 @@ class Rebalancer:
             order["status"] = "skipped_min_notional"
             logger.debug(f"Skipped {symbol}: notional ${notional:.2f} < ${MIN_NOTIONAL}")
             return order
+
+        # Execution gate (new entries only)
+        exec_gate = GATES.get("execution_gate", {})
+        gate_enabled = bool(
+            GATES.get("enabled", False)
+            and exec_gate.get("enabled", False)
+            and not reduce_only
+        )
+        if gate_enabled:
+            levels = int(exec_gate.get("orderbook_levels", 20))
+            metrics = self.api.estimate_market_impact_bps(
+                symbol=symbol,
+                side=side,
+                notional=notional,
+                levels=levels,
+            )
+            if metrics.get("mid_price", 0) > 0:
+                spread_bps = float(metrics.get("spread_bps", 0.0))
+                impact_bps = float(metrics.get("impact_bps", 0.0))
+                fill_ratio = float(metrics.get("fill_ratio", 0.0))
+                commission_bps = float(TRADING.get("commission_bps", 4.0))
+                slippage_bps = float(TRADING.get("slippage_bps", 5.0))
+                total_cost_bps = spread_bps + impact_bps + commission_bps + slippage_bps
+
+                fail_reasons = []
+                if spread_bps > float(exec_gate.get("max_spread_bps", 12.0)):
+                    fail_reasons.append(f"spread={spread_bps:.1f}bps")
+                if impact_bps > float(exec_gate.get("max_impact_bps", 18.0)):
+                    fail_reasons.append(f"impact={impact_bps:.1f}bps")
+                if total_cost_bps > float(exec_gate.get("max_total_cost_bps", 32.0)):
+                    fail_reasons.append(f"total={total_cost_bps:.1f}bps")
+                if fill_ratio < float(exec_gate.get("min_fill_ratio", 0.90)):
+                    fail_reasons.append(f"fill_ratio={fill_ratio:.2f}")
+
+                if fail_reasons:
+                    reason = ", ".join(fail_reasons)
+                    order["status"] = "skipped_gate"
+                    order["gate_reason"] = reason
+                    order["gate_metrics"] = {
+                        "spread_bps": spread_bps,
+                        "impact_bps": impact_bps,
+                        "total_cost_bps": total_cost_bps,
+                        "fill_ratio": fill_ratio,
+                    }
+                    logger.info(f"Execution gate blocked {symbol} {side}: {reason}")
+                    return order
+            else:
+                logger.warning(
+                    f"Execution gate skipped for {symbol}: invalid orderbook metrics "
+                    "(fail-open)"
+                )
 
         if self.dry_run:
             logger.info(
@@ -278,6 +343,7 @@ class Rebalancer:
             "dry_run": "모의",
             "error": "오류",
             "skipped_min_notional": "최소금액미달",
+            "skipped_gate": "게이트차단",
             "skipped_zero_qty": "수량부족",
             "unknown": "알수없음",
         }
@@ -316,12 +382,13 @@ class Rebalancer:
 
         for pos in positions:
             symbol = pos["symbol"]
-            amt = float(pos.get("positionAmt", 0))
+            amt = float(pos.get("size", 0))
 
             if amt == 0:
                 continue
 
-            side = "SELL" if amt > 0 else "BUY"
+            pos_side = pos.get("side", "long")
+            side = "SELL" if pos_side == "long" else "BUY"
 
             try:
                 if not self.dry_run:

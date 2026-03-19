@@ -16,7 +16,8 @@
       "Bash(findstr:*)",
       "Bash(python:*)",
       "Bash(du:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(find src/engine src/alphas/v2 config/settings.py scripts/backtest_sim.py -name *.py -newer .git/index)"
     ]
   }
 }

@@ -65,7 +65,7 @@ class CandleAggregator:
         self.interval_minutes = interval_minutes
         self._current_candles: dict[str, CandleBar] = {}
         self._completed_candles: dict[str, list[CandleBar]] = defaultdict(list)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._on_candle_complete: Callable[[CandleBar], None] | None = None
 
     def set_on_complete(self, callback: Callable[[CandleBar], None]) -> None:

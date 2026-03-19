@@ -7,11 +7,11 @@ class CSMomentum(BaseAlpha):
     """
     Cross-Sectional Momentum 전략
     로직: lookback 기간의 수익률에서 최근 skip_days를 제외한 순수 모멘텀 측정.
-    크립토 시장에 맞게 기본 60일 lookback, 5일 skip (단기 반전 방지).
+    크립토 시장에 맞게 기본 21일 lookback, 3일 skip (단기 반전 방지).
     데이터: 일봉 가격 데이터
     """
 
-    def __init__(self, name="CSMomentum", lookback_days=60, skip_days=5):
+    def __init__(self, name="CSMomentum", lookback_days=21, skip_days=3):
         super().__init__(name)
         if skip_days >= lookback_days:
             raise ValueError(
@@ -45,7 +45,7 @@ class CSMomentum(BaseAlpha):
                 continue
 
             price_start = ticker_data.iloc[-self.lookback_days]['close']
-            price_end = ticker_data.iloc[-self.skip_days]['close']
+            price_end = ticker_data.iloc[-(self.skip_days + 1)]['close']
 
             if price_start == 0 or pd.isna(price_start) or pd.isna(price_end):
                 continue

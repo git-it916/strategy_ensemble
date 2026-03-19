@@ -42,7 +42,9 @@ class TradeProposal:
 # Korean-friendly alpha descriptions
 ALPHA_DESCRIPTIONS = {
     "cs_momentum": "횡단면 모멘텀 (11개월 수익률 상위)",
+    "time_series_momentum": "시계열 모멘텀 (20일 추세 추종)",
     "ts_momentum": "시계열 모멘텀 (20일 추세 추종)",
+    "time_series_mean_reversion": "시계열 평균회귀 (과매도 반등)",
     "ts_mean_reversion": "시계열 평균회귀 (과매도 반등)",
     "pv_divergence": "가격-거래량 괴리 (거래량 급증 감지)",
     "volume_momentum": "거래량 모멘텀 (거래량 가속도)",

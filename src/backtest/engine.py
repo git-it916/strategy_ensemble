@@ -87,12 +87,13 @@ class BacktestEngine:
 
     def __init__(
         self,
-        initial_capital: float = 100_000_000,
-        commission_bps: float = 1.5,
-        tax_bps: float = 23.0,
-        slippage_bps: float = 10.0,
+        initial_capital: float = 10_000,
+        commission_bps: float = 4.0,
+        tax_bps: float = 0.0,
+        slippage_bps: float = 5.0,
         max_position_weight: float = 0.10,
-        rebalance_frequency: str = "daily",
+        rebalance_frequency: str = "weekly",
+        min_rebalance_turnover: float = 0.05,
     ):
         self.initial_capital = initial_capital
         self.commission_bps = commission_bps
@@ -100,6 +101,7 @@ class BacktestEngine:
         self.slippage_bps = slippage_bps
         self.max_position_weight = max_position_weight
         self.rebalance_frequency = rebalance_frequency
+        self.min_rebalance_turnover = min_rebalance_turnover
 
     def run(
         self,
@@ -214,12 +216,18 @@ class BacktestEngine:
                             zip(target_weights["ticker"], target_weights["weight"])
                         )
 
-                # Transaction costs
-                cost = self._apply_transaction_costs(
-                    current_weights, new_weights, portfolio_value
-                )
-                portfolio_value -= cost
-                daily_costs.append(cost)
+                # Skip rebalance if turnover below threshold
+                turnover = self._calculate_turnover(current_weights, new_weights)
+                if turnover < self.min_rebalance_turnover and current_weights:
+                    new_weights = current_weights
+                    daily_costs.append(0.0)
+                else:
+                    # Transaction costs
+                    cost = self._apply_transaction_costs(
+                        current_weights, new_weights, portfolio_value
+                    )
+                    portfolio_value -= cost
+                    daily_costs.append(cost)
 
                 # Orders filled on signal_date close, weights active from next open.
                 period_return = self._calculate_period_return(
@@ -422,6 +430,19 @@ class BacktestEngine:
         # Cash portion earns nothing
         return portfolio_return
 
+    @staticmethod
+    def _calculate_turnover(
+        old_weights: dict[str, float],
+        new_weights: dict[str, float],
+    ) -> float:
+        """Calculate one-way turnover between two portfolios."""
+        all_tickers = set(old_weights) | set(new_weights)
+        turnover = sum(
+            abs(new_weights.get(t, 0) - old_weights.get(t, 0))
+            for t in all_tickers
+        ) / 2.0
+        return turnover
+
     def _apply_transaction_costs(
         self,
         old_weights: dict[str, float],
@@ -431,9 +452,9 @@ class BacktestEngine:
         """
         Calculate transaction costs for rebalancing.
 
-        Korean market:
-        - Buy: commission (1.5 bps) + slippage (10 bps)
-        - Sell: commission (1.5 bps) + tax (23 bps) + slippage (10 bps)
+        Binance USDT-M perpetual futures:
+        - Buy: commission (4 bps) + slippage (5 bps)
+        - Sell: commission (4 bps) + slippage (5 bps)
         """
         total_cost = 0.0
 

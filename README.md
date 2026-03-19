@@ -2,9 +2,7 @@
 
 바이낸스 USDT-M 무기한 선물을 대상으로, 여러 알파 전략의 신호를 결합하여 자동으로 매매하는 시스템입니다.
 
-```
 conda activate strategy_ensemble
-```
 
 ---
 

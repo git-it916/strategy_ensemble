@@ -22,34 +22,30 @@ class TelegramNotifier:
         self,
         bot_token: str,
         chat_id: str | int,
+        broadcast_chat_ids: list[str | int] | None = None,
     ):
         """
         Initialize Telegram notifier.
 
         Args:
             bot_token: Telegram Bot API token
-            chat_id: Target chat ID (user or group)
+            chat_id: Primary chat ID (user or group)
+            broadcast_chat_ids: Additional chat IDs to broadcast to
         """
         self.bot_token = bot_token
         self.chat_id = str(chat_id)
+        self.broadcast_chat_ids = [
+            str(cid) for cid in (broadcast_chat_ids or [])
+        ]
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
 
-    def send_message(self, text: str, parse_mode: str = "HTML") -> bool:
-        """
-        Send a text message.
-
-        Args:
-            text: Message text
-            parse_mode: HTML or Markdown
-
-        Returns:
-            True if sent successfully
-        """
+    def _send_to_chat(self, chat_id: str, text: str, parse_mode: str = "HTML") -> bool:
+        """Send a message to a specific chat ID."""
         try:
             response = requests.post(
                 f"{self.base_url}/sendMessage",
                 json={
-                    "chat_id": self.chat_id,
+                    "chat_id": chat_id,
                     "text": text,
                     "parse_mode": parse_mode,
                 },
@@ -58,8 +54,15 @@ class TelegramNotifier:
             response.raise_for_status()
             return True
         except Exception as e:
-            logger.error(f"Failed to send Telegram message: {e}")
+            logger.error(f"Failed to send Telegram message to {chat_id}: {e}")
             return False
+
+    def send_message(self, text: str, parse_mode: str = "HTML") -> bool:
+        """Send a message to primary chat + all broadcast chats."""
+        ok = self._send_to_chat(self.chat_id, text, parse_mode)
+        for cid in self.broadcast_chat_ids:
+            self._send_to_chat(cid, text, parse_mode)
+        return ok
 
     def send_trade_alert(
         self,

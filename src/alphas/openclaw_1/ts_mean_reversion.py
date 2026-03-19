@@ -100,6 +100,20 @@ class TimeSeriesMeanReversion(BaseAlpha):
             z_score = (recent_ret - mean_ret) / std_ret
             # Invert: high z-score (overbought) → negative score (sell)
             score = float(-np.tanh(z_score * 0.5))
+
+            # Dampen reversion signal when strong persistent trend exists.
+            # Use 20-day return as trend indicator (longer than 5-day signal window).
+            if len(closes) >= 20:
+                trend_return = (closes[-1] / closes[-20]) - 1
+                # Short signal but strong uptrend
+                if score < -0.3 and trend_return > 0.10:
+                    dampen = max(0.2, 1.0 - trend_return * 3)
+                    score = score * dampen
+                # Long signal but strong downtrend
+                elif score > 0.3 and trend_return < -0.10:
+                    dampen = max(0.2, 1.0 + trend_return * 3)
+                    score = score * dampen
+
             records.append({"ticker": ticker, "score": score})
 
         signals = pd.DataFrame(records) if records else pd.DataFrame(columns=["ticker", "score"])

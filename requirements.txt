@@ -57,7 +57,7 @@ mypy>=1.5.0
 
 # WebSocket (KIS real-time data)
 websockets>=12.0
-antrophic
+anthropic
 ccxt
 # Jupyter (optional)
 # jupyterlab>=4.0.0

@@ -36,10 +36,12 @@ class FundingRateCarry(BaseAlpha):
     def __init__(
         self,
         name: str = "FundingRateCarry",
-        lookback_days: int = 7,
+        lookback_days: int = 14,
+        abs_threshold: float = 0.0001,
     ):
         super().__init__(name)
         self.lookback_days = lookback_days
+        self.abs_threshold = abs_threshold
 
     def fit(
         self,
@@ -111,10 +113,47 @@ class FundingRateCarry(BaseAlpha):
         if avg_funding.empty:
             return empty
 
+        # Filter out coins where funding rate is too close to zero (no edge)
+        avg_funding = avg_funding[
+            avg_funding["avg_funding"].abs() >= self.abs_threshold
+        ]
+        if avg_funding.empty:
+            return empty
+
         # Score: rank inversely (low/negative funding → high score → long)
         avg_funding["score"] = (
             (avg_funding["avg_funding"].rank(pct=True) - 0.5) * -2
         )
+
+        # Dampen signal when price trend is strongly aligned with carry direction.
+        # Negative funding → positive score (long), but if price already surging → don't chase
+        # Positive funding → negative score (short), but if price already crashing → don't chase
+        for ticker in avg_funding["ticker"].unique():
+            ticker_prices = prices[prices["ticker"] == ticker].sort_values(
+                "date" if "date" in prices.columns else "datetime"
+            )
+            if len(ticker_prices) >= 5:
+                recent = ticker_prices["close"].iloc[-5:]
+                price_return = (recent.iloc[-1] / recent.iloc[0]) - 1
+                funding_val = avg_funding.loc[
+                    avg_funding["ticker"] == ticker, "avg_funding"
+                ].iloc[0]
+                score_val = avg_funding.loc[
+                    avg_funding["ticker"] == ticker, "score"
+                ].iloc[0]
+
+                # Caution: negative funding → long signal, but price already rising fast
+                if funding_val < 0 and price_return > 0.03:
+                    dampen = max(0.2, 1.0 - price_return * 5)  # 3%→0.85, 10%→0.5, 16%→0.2
+                    avg_funding.loc[
+                        avg_funding["ticker"] == ticker, "score"
+                    ] = score_val * dampen
+                # Caution: positive funding → short signal, but price already falling fast
+                elif funding_val > 0 and price_return < -0.03:
+                    dampen = max(0.2, 1.0 + price_return * 5)
+                    avg_funding.loc[
+                        avg_funding["ticker"] == ticker, "score"
+                    ] = score_val * dampen
 
         signals = avg_funding[["ticker", "score"]].reset_index(drop=True)
 
@@ -129,7 +168,8 @@ class FundingRateCarry(BaseAlpha):
         )
 
     def _get_extra_state(self) -> dict[str, Any]:
-        return {"lookback_days": self.lookback_days}
+        return {"lookback_days": self.lookback_days, "abs_threshold": self.abs_threshold}
 
     def _restore_extra_state(self, state: dict[str, Any]) -> None:
-        self.lookback_days = state.get("lookback_days", 7)
+        self.lookback_days = state.get("lookback_days", 14)
+        self.abs_threshold = state.get("abs_threshold", 0.0001)

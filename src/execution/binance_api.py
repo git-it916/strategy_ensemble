@@ -126,6 +126,35 @@ class BinanceApi:
 
         return [sym for sym, _ in ranked[:n]]
 
+    def get_quote_volume_batch(self, symbols: list[str]) -> dict[str, float]:
+        """
+        Fetch 24h quote volume (USDT) for symbols.
+
+        Returns:
+            {ticker: quote_volume_usdt}
+        """
+        if not symbols:
+            return {}
+
+        result: dict[str, float] = {}
+        try:
+            tickers = self._exchange.fetch_tickers(symbols)
+            for symbol in symbols:
+                t = tickers.get(symbol, {})
+                qv = t.get("quoteVolume")
+                if qv is None:
+                    # Fallback if quoteVolume is missing
+                    base_v = t.get("baseVolume")
+                    last = t.get("last") or t.get("close")
+                    if base_v is not None and last is not None:
+                        qv = float(base_v) * float(last)
+                if qv is not None:
+                    result[symbol] = float(qv)
+        except Exception as e:
+            logger.warning(f"Quote volume fetch failed: {e}")
+
+        return result
+
     # ------------------------------------------------------------------
     # OHLCV
     # ------------------------------------------------------------------
@@ -167,13 +196,25 @@ class BinanceApi:
 
         for symbol in symbols:
             try:
-                raw = self.get_ohlcv(symbol, timeframe=timeframe, since=since, limit=days + 10)
+                # For intraday timeframes, calculate appropriate limit
+                if timeframe == "1h":
+                    limit = days * 24 + 10
+                elif timeframe in ("5m", "15m"):
+                    limit = min(days * 288, 1500)  # Binance max 1500
+                else:
+                    limit = days + 10
+                raw = self.get_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
                 if not raw:
                     logger.warning(f"No OHLCV data for {symbol}")
                     continue
 
                 df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
-                df["date"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.date
+                ts_utc = pd.to_datetime(df["ts"], unit="ms", utc=True)
+                if timeframe == "1d":
+                    df["date"] = ts_utc.dt.date
+                else:
+                    # Keep full datetime for intraday timeframes
+                    df["date"] = ts_utc
                 df["ticker"] = symbol
                 df = df.drop(columns=["ts"])
                 records.append(df)
@@ -187,7 +228,9 @@ class BinanceApi:
             return pd.DataFrame(columns=["date", "ticker", "open", "high", "low", "close", "volume"])
 
         result = pd.concat(records, ignore_index=True)
-        result["date"] = pd.to_datetime(result["date"])
+        # Only convert if not already datetime (daily data comes as date objects)
+        if not pd.api.types.is_datetime64_any_dtype(result["date"]):
+            result["date"] = pd.to_datetime(result["date"])
         return result.sort_values(["date", "ticker"]).reset_index(drop=True)
 
     # ------------------------------------------------------------------
@@ -284,12 +327,24 @@ class BinanceApi:
 
         Returns DataFrame with columns:
             ticker, side, size, entry_price, unrealized_pnl, leverage
+
+        On API error returns None (not empty DataFrame) so callers can
+        distinguish "no positions" from "API failed".
         """
         try:
             positions = self._exchange.fetch_positions()
         except Exception as e:
-            logger.error(f"Failed to fetch positions: {e}")
-            return pd.DataFrame()
+            if "Timestamp" in str(e) or "-1021" in str(e):
+                logger.warning(f"Timestamp error fetching positions, re-syncing clock...")
+                self._sync_time()
+                try:
+                    positions = self._exchange.fetch_positions()
+                except Exception as e2:
+                    logger.error(f"Failed to fetch positions after resync: {e2}")
+                    return None
+            else:
+                logger.error(f"Failed to fetch positions: {e}")
+                return None
 
         rows = []
         for p in positions:
@@ -325,7 +380,23 @@ class BinanceApi:
                 ),
             }
         except Exception as e:
-            logger.error(f"Failed to fetch account: {e}")
+            if "Timestamp" in str(e) or "-1021" in str(e):
+                logger.warning(f"Timestamp error fetching account, re-syncing clock...")
+                self._sync_time()
+                try:
+                    balance = self._exchange.fetch_balance()
+                    usdt = balance.get("USDT", {})
+                    return {
+                        "total_wallet_balance": float(usdt.get("total") or 0),
+                        "available_balance": float(usdt.get("free") or 0),
+                        "total_unrealized_pnl": float(
+                            balance.get("info", {}).get("totalUnrealizedProfit") or 0
+                        ),
+                    }
+                except Exception as e2:
+                    logger.error(f"Failed to fetch account after resync: {e2}")
+            else:
+                logger.error(f"Failed to fetch account: {e}")
             return {"total_wallet_balance": 0, "available_balance": 0, "total_unrealized_pnl": 0}
 
     # ------------------------------------------------------------------
@@ -392,3 +463,169 @@ class BinanceApi:
             logger.info(f"Leverage set: {symbol} x{leverage}")
         except Exception as e:
             logger.warning(f"set_leverage failed for {symbol}: {e}")
+
+    def estimate_market_impact_bps(
+        self,
+        symbol: str,
+        side: str,
+        notional: float,
+        levels: int = 20,
+    ) -> dict[str, float]:
+        """
+        Estimate spread/impact from orderbook for a market order.
+
+        Args:
+            symbol: Exchange symbol
+            side: BUY or SELL
+            notional: Quote notional (USDT)
+            levels: Orderbook depth levels to fetch
+
+        Returns:
+            {
+              "spread_bps": float,
+              "impact_bps": float,
+              "fill_ratio": float,
+              "mid_price": float,
+              "est_fill_price": float
+            }
+        """
+        if notional <= 0:
+            return {
+                "spread_bps": 0.0,
+                "impact_bps": 0.0,
+                "fill_ratio": 0.0,
+                "mid_price": 0.0,
+                "est_fill_price": 0.0,
+            }
+
+        try:
+            book = self._exchange.fetch_order_book(symbol, limit=levels)
+            bids = book.get("bids", []) or []
+            asks = book.get("asks", []) or []
+            if not bids or not asks:
+                return {
+                    "spread_bps": 1e9,
+                    "impact_bps": 1e9,
+                    "fill_ratio": 0.0,
+                    "mid_price": 0.0,
+                    "est_fill_price": 0.0,
+                }
+
+            best_bid = float(bids[0][0])
+            best_ask = float(asks[0][0])
+            mid = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else 0.0
+            spread_bps = ((best_ask - best_bid) / mid) * 10000 if mid > 0 else 1e9
+
+            side_upper = side.upper()
+            levels_to_consume = asks if side_upper == "BUY" else bids
+
+            remaining_quote = float(notional)
+            executed_quote = 0.0
+            executed_base = 0.0
+            for lvl in levels_to_consume:
+                if remaining_quote <= 0:
+                    break
+                price = float(lvl[0])
+                size_base = float(lvl[1])
+                if price <= 0 or size_base <= 0:
+                    continue
+                lvl_quote = price * size_base
+                take_quote = min(remaining_quote, lvl_quote)
+                executed_quote += take_quote
+                executed_base += take_quote / price
+                remaining_quote -= take_quote
+
+            fill_ratio = executed_quote / notional if notional > 0 else 0.0
+            est_fill = executed_quote / executed_base if executed_base > 0 else 0.0
+            impact_bps = (abs(est_fill - mid) / mid) * 10000 if mid > 0 and est_fill > 0 else 1e9
+
+            return {
+                "spread_bps": float(spread_bps),
+                "impact_bps": float(impact_bps),
+                "fill_ratio": float(fill_ratio),
+                "mid_price": float(mid),
+                "est_fill_price": float(est_fill),
+            }
+        except Exception as e:
+            logger.debug(f"Orderbook impact estimate failed for {symbol}: {e}")
+            return {
+                "spread_bps": 1e9,
+                "impact_bps": 1e9,
+                "fill_ratio": 0.0,
+                "mid_price": 0.0,
+                "est_fill_price": 0.0,
+            }
+
+    # ------------------------------------------------------------------
+    # Derivatives Sentiment (OI + Long/Short Ratio)
+    # ------------------------------------------------------------------
+
+    def get_open_interest_batch(self, symbols: list[str]) -> dict:
+        """
+        Fetch current open interest for multiple symbols.
+
+        Returns:
+            {ticker: {"value": float (USDT), "change_24h": float (ratio)}}
+        """
+        result = {}
+        for symbol in symbols:
+            try:
+                ccxt_sym = self._exchange.market_id(symbol)
+                # Current OI
+                oi_resp = self._exchange.fapiPublicGetOpenInterest({"symbol": ccxt_sym})
+                oi_usdt = float(oi_resp.get("openInterest", 0))
+                price = self.get_price(symbol)
+                oi_value = oi_usdt * price
+
+                # 24h OI change from history
+                now_ms = int(time.time() * 1000)
+                oi_hist = self._exchange.fapiDataGetOpenInterestHist({
+                    "symbol": ccxt_sym,
+                    "period": "1h",
+                    "limit": 25,  # ~24h of hourly data
+                })
+                change_24h = 0.0
+                if oi_hist and len(oi_hist) >= 2:
+                    oldest_oi = float(oi_hist[0].get("sumOpenInterest", 0))
+                    latest_oi = float(oi_hist[-1].get("sumOpenInterest", 0))
+                    if oldest_oi > 0:
+                        change_24h = (latest_oi / oldest_oi) - 1
+
+                result[symbol] = {"value": oi_value, "change_24h": change_24h}
+                time.sleep(self.rate_limit_sleep)
+            except Exception as e:
+                logger.debug(f"OI fetch failed for {symbol}: {e}")
+                continue
+        return result
+
+    def get_long_short_ratio_batch(self, symbols: list[str]) -> dict:
+        """
+        Fetch top trader long/short position ratio for multiple symbols.
+
+        Returns:
+            {ticker: {"ratio": float, "long_pct": float, "short_pct": float}}
+        """
+        result = {}
+        for symbol in symbols:
+            try:
+                ccxt_sym = self._exchange.market_id(symbol)
+                resp = self._exchange.fapiDataGetTopLongShortPositionRatio({
+                    "symbol": ccxt_sym,
+                    "period": "1h",
+                    "limit": 1,
+                })
+                if resp:
+                    latest = resp[-1] if isinstance(resp, list) else resp
+                    ratio = float(latest.get("longShortRatio", 1.0))
+                    long_pct = float(latest.get("longAccount", 0.5))
+                    short_pct = float(latest.get("shortAccount", 0.5))
+                    result[symbol] = {
+                        "ratio": ratio,
+                        "long_pct": long_pct,
+                        "short_pct": short_pct,
+                    }
+                time.sleep(self.rate_limit_sleep)
+            except Exception as e:
+                logger.debug(f"L/S ratio fetch failed for {symbol}: {e}")
+                continue
+        return result

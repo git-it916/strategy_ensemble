@@ -1,267 +1,105 @@
 """
-Global Settings
+Global Settings — CLAUDE.md 섹션 12 기준
 
-Trading parameters and configuration for Binance USDT-M perpetual futures.
+모든 매직 넘버는 여기에. 코드에 하드코딩하지 않는다.
 """
-
-from __future__ import annotations
 
 from pathlib import Path
 
-# =============================================================================
-# Paths
-# =============================================================================
+# === Paths ===
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
-PROCESSED_DATA_DIR = DATA_DIR / "processed"
 MODELS_DIR = PROJECT_ROOT / "models"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
-# =============================================================================
-# Binance Exchange Settings
-# =============================================================================
-BINANCE = {
-    "keys_path": "config/keys.yaml",
-    "testnet": False,
-    "futures_ws_url": "wss://fstream.binance.com",
-    "rate_limit_sleep": 0.2,
+# === Universe ===
+UNIVERSE_SIZE = 20
+MIN_24H_VOLUME_USDT = 50_000_000  # $50M 이상만
+
+# 화이트리스트: 시가총액 상위 메이저 코인만 허용
+# 이 목록에 없는 코인은 거래량이 아무리 높아도 제외 (펌프 방지)
+COIN_WHITELIST = [
+    "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "AVAX",
+    "LINK", "DOT", "SUI", "NEAR", "APT", "ARB", "OP",
+    "ATOM", "UNI", "FIL", "LTC", "TIA", "INJ", "SEI",
+    "FET", "RENDER", "TAO", "HYPE", "AAVE", "MKR",
+    "TON", "TRX", "MATIC", "ETC",
+]
+
+# 블랙리스트: 화이트리스트에 있더라도 추가로 제외할 코인
+BLACKLIST = [
+    "BTCDOM", "DEFI",  # 지수
+]
+
+# === Alpha Weights (합계 = 1.0) ===
+# 인트라데이 중심: 실시간/5분/1시간 데이터 알파 78%, 일봉 배경 22%
+ALPHA_WEIGHTS = {
+    # --- 인트라데이 (5분~1시간, 매 사이클 갱신) ---
+    "MomentumMultiScale": 0.25,        # 5분봉 멀티스케일 (핵심)
+    "IntradayVWAPV2": 0.20,            # 1시간봉 VWAP 이탈
+    "OrderbookImbalance": 0.18,        # 실시간 오더북
+    "IntradayRSIV2": 0.15,             # 1시간봉 RSI
+    # --- 배경 컨텍스트 (일봉, 4시간 갱신) ---
+    "FundingCarryEnhanced": 0.08,      # 펀딩 방향 참고
+    "MomentumComposite": 0.06,         # 20일 추세 참고
+    "MeanReversionMultiHorizon": 0.05, # 장기 z-score 참고
+    "DerivativesSentiment": 0.03,      # OI/LS 참고
+    # --- 비활성 ---
+    "SpreadMomentum": 0.00,
+    "VolatilityRegime": 0.00,
 }
 
-# =============================================================================
-# Universe Settings  (Binance USDT-M Perpetual Futures)
-# =============================================================================
-UNIVERSE = {
-    "exchange": "binance_futures",
-    "quote_currency": "USDT",
-    "top_n_by_volume": 10,
-    "min_volume_usdt": 1e8,
-    "exclude_symbols": [
-        "BTCDOMUSDT", "DEFIUSDT", "BTCSTUSDT",
-        # TradFi / commodity perps (require separate agreement)
-        "XAGUSDT", "XAUUSDT",
-        # Low-liquidity / micro-cap tokens prone to min-notional issues
-        "POWERUSDT",
-    ],
-}
+# === 진입 임계값 (롱/숏 비대칭) ===
+LONG_ENTRY_THRESHOLD = 0.14            # 백테스트 기준 최적 (승률 50%, ROI+)
+SHORT_ENTRY_THRESHOLD = -0.16          # 숏은 약간 엄격
 
-# =============================================================================
-# Trading Parameters  (Futures / Long-Short)
-# =============================================================================
-TRADING = {
-    "max_position_weight": 0.30,
-    "min_position_weight": 0.05,
-    "max_positions": 3,
-    "min_notional_usdt": 5,
-    "max_leverage": 3.0,
-    "max_drawdown": 0.15,
-    "daily_loss_limit": 0.03,
-    "order_type": "market",
-    "slippage_bps": 5,
-    "commission_bps": 4.0,
-    "funding_cost_per_8h": True,
-}
+# === SL/TP (롱/숏 비대칭) ===
+LONG_SL_PCT = -0.035                   # -0.05→-0.035 (x3=-10.5%, 큰 손실 방지)
+LONG_TP_PCT = 0.10
+SHORT_SL_PCT = -0.025                  # -0.03→-0.025
+SHORT_TP_PCT = 0.08
 
-# =============================================================================
-# Strategy Settings
-# =============================================================================
-STRATEGIES = {
-    # --- OpenClaw Alphas (Active) ---
-    # Weights sum to 1.0 across all enabled strategies
-    "cs_momentum": {
-        "enabled": True,
-        "weight": 0.15,
-        "lookback_days": 60,
-        "skip_days": 5,
-    },
-    "ts_momentum": {
-        "enabled": True,
-        "weight": 0.12,
-        "lookback_days": 20,
-    },
-    "ts_mean_reversion": {
-        "enabled": True,
-        "weight": 0.08,
-        "signal_window": 5,
-        "baseline_window": 60,
-    },
-    "pv_divergence": {
-        "enabled": True,
-        "weight": 0.08,
-        "lookback_days": 20,
-    },
-    "volume_momentum": {
-        "enabled": True,
-        "weight": 0.07,
-        "lookback_days": 20,
-    },
-    "low_volatility_anomaly": {
-        "enabled": True,
-        "weight": 0.07,
-        "lookback_days": 20,
-    },
-    "funding_rate_carry": {
-        "enabled": True,
-        "weight": 0.20,
-        "lookback_days": 7,
-    },
-    "rsi_reversal": {
-        "enabled": True,
-        "weight": 0.12,
-        "rsi_period": 14,
-        "oversold": 30,
-        "overbought": 70,
-    },
-    "vol_breakout": {
-        "enabled": True,
-        "weight": 0.11,
-        "lookback": 20,
-        "breakout_threshold": 1.5,
-    },
-    "value_f_score": {"enabled": False, "weight": 0.0},
-    "sentiment_long": {"enabled": False, "weight": 0.0},
-    "return_prediction": {"enabled": False, "weight": 0.0, "type": "ml"},
-    "intraday_pattern": {"enabled": False, "weight": 0.0, "type": "ml"},
-    "volatility_forecast": {"enabled": False, "weight": 0.0, "type": "ml"},
-    "llm_alpha": {"enabled": False, "type": "llm"},
-}
+# === 트레일링 ===
+TRAILING_ACTIVATION_PCT = 0.025
+TRAILING_DISTANCE_PCT = 0.015
 
-# =============================================================================
-# Regime Classifier Settings
-# =============================================================================
-REGIME_CLASSIFIER = {
-    "enabled": False,
-    "n_estimators": 300,
-    "max_depth": 8,
-    "min_samples_leaf": 20,
-    "regime_horizon": 20,
-    "bull_threshold": 0.03,
-    "bear_threshold": -0.03,
-}
+# === 레버리지 ===
+LEVERAGE = 3
 
-# =============================================================================
-# Ensemble Settings
-# =============================================================================
-ENSEMBLE = {
-    "use_dynamic_weights": True,
-    "performance_lookback": 21,
-    "performance_blend": 0.5,
-    "use_llm_orchestrator": False,
-    "regime_preferences": {
-        "bull": {
-            "cs_momentum": 1.5,
-            "ts_momentum": 1.4,
-            "vol_breakout": 1.3,
-            "funding_rate_carry": 1.2,
-            "ts_mean_reversion": 0.6,
-        },
-        "bear": {
-            "ts_mean_reversion": 1.5,
-            "funding_rate_carry": 1.4,
-            "low_volatility_anomaly": 1.3,
-            "cs_momentum": 0.6,
-            "ts_momentum": 0.5,
-        },
-        "sideways": {
-            "ts_mean_reversion": 1.3,
-            "pv_divergence": 1.2,
-            "funding_rate_carry": 1.1,
-            "cs_momentum": 0.8,
-        },
-    },
-}
+# === 타이밍 ===
+REBALANCE_INTERVAL_SEC = 300        # 5분
+SLTP_CHECK_INTERVAL_SEC = 5
+ORDERBOOK_INTERVAL_SEC = 60
+DAILY_REFRESH_INTERVAL_SEC = 14400  # 4시간
+UNIVERSE_REFRESH_INTERVAL_SEC = 3600  # 1시간
+MIN_HOLD_MINUTES = 15              # 90→15 (인트라데이: 3사이클 최소 확인)
+COOLDOWN_MINUTES = 20              # 60→20 (같은 코인 재진입 쿨다운)
+SWITCH_COOLDOWN_MINUTES = 15       # 60→15
+SWITCH_SAME_DIR_GAP = 0.10         # 새 스케일 기준
+SWITCH_REVERSE_SCORE_DROP = 0.08   # 새 스케일 기준
+ENTRY_CONFIRM_CYCLES = 2           # 3→2 (10분 확인, 인트라데이 속도)
+ENTRY_REQUIRE_RISING = True        # 2사이클간 스코어 상승 요구
+ENTRY_MIN_SCORE_INCREASE = 0.01    # 0.015→0.01 (2사이클이므로 완화)
+# 청산 — 점진적 시그널 감쇠 (인트라데이: 빠른 반응)
+FADE_THRESHOLD = 0.08              # 진입 임계값의 ~57%
+FADE_DURATION_MIN = 15             # 30→15 (인트라데이)
+WEAK_THRESHOLD = 0.04              # 시그널 거의 소멸
+WEAK_DURATION_MIN = 10             # 15→10
+MAX_TRADES_PER_DAY = 6             # 4→6 (인트라데이 빈도 증가)
+SWITCH_MIN_HOLD_MINUTES = 30       # 120→30 (인트라데이)
+MAX_SAME_SYMBOL_LOSSES = 3         # 같은 코인 연속 N번 손실시 4시간 차단
+SAME_SYMBOL_BAN_HOURS = 4
 
-# =============================================================================
-# Backtest Settings
-# =============================================================================
-BACKTEST = {
-    "start_date": "2022-01-01",
-    "end_date": "2025-12-31",
-    "initial_capital": 10_000,
-    "rebalance_frequency": "daily",
-    "benchmark": "BTC/USDT:USDT",
-}
+# === 일일 손실 한도 ===
+DAILY_MAX_LOSS_PCT = -0.05
 
-# =============================================================================
-# Schedule Settings
-# =============================================================================
-SCHEDULE = {
-    "market_open": "00:00",
-    "market_close": "23:59",
-    "data_update": "00:05",
-    "signal_generation": "00:10",
-    "rebalance_time": "00:15",
-    "eod_report": "00:00",
-}
+# === Stacking ===
+STACKING_MIN_HOURS = 16  # 16시간 후 첫 학습 (192 사이클 × 10코인 = ~1920행)
+STACKING_TRAIN_WINDOW_DAYS = 90
+STACKING_RETRAIN_INTERVAL_DAYS = 30
 
-# =============================================================================
-# WebSocket Settings (Binance Real-time)
-# =============================================================================
-WEBSOCKET_CONFIG = {
-    "candle_interval": "1m",
-    "signal_interval_minutes": 5,
-    "auto_reconnect": True,
-    "reconnect_delay": 5.0,
-    "max_reconnect_attempts": 10,
-    "heartbeat_interval": 20,
-    "min_ticks_for_signal": 10,
-}
+# === 포지션 사이징 ===
+BALANCE_USAGE_RATIO = 0.95  # 잔고의 95% 사용
 
-# =============================================================================
-# Pipeline Settings
-# =============================================================================
-PIPELINE = {
-    "top_n_symbols": 50,
-    "active_strategies": [
-        "cs_momentum",
-        "ts_momentum",
-        "ts_mean_reversion",
-        "pv_divergence",
-        "volume_momentum",
-        "low_volatility_anomaly",
-        "funding_rate_carry",
-        "rsi_reversal",
-        "vol_breakout",
-    ],
-    # Use TRADING values for consistency (override only for backtest if needed)
-    "max_position_weight": TRADING["max_position_weight"],
-    "max_positions": TRADING["max_positions"],
-    "require_human_approval": True,
-    "approval_timeout_seconds": 300,
-}
-
-# =============================================================================
-# Daemon Settings (Unified: OpenClaw + Trading)
-# =============================================================================
-DAEMON = {
-    "rebalance_interval_minutes": 5,
-    "auto_research_interval_hours": 24,
-    "trade_approval_timeout_seconds": 300,
-    "max_proposal_positions": 10,
-}
-
-# =============================================================================
-# Sonnet Decision Maker Settings
-# =============================================================================
-SONNET_DECISION = {
-    "model": "claude-sonnet-4-20250514",
-    "max_tokens": 1024,
-    "default_stop_loss_pct": -0.05,
-    "default_take_profit_pct": 0.10,
-    # SL bounds: tightest = closest to entry, loosest = farthest from entry
-    "tightest_stop_loss_pct": -0.02,   # -2% (closest allowed SL)
-    "loosest_stop_loss_pct": -0.08,    # -8% (farthest allowed SL)
-    # TP bounds: smallest = minimum profit target, largest = max target
-    "smallest_take_profit_pct": 0.03,  # +3% minimum TP
-    "largest_take_profit_pct": 0.15,   # +15% maximum TP
-    "sltp_check_interval_seconds": 5,
-}
-
-# =============================================================================
-# Logging Settings
-# =============================================================================
-LOGGING = {
-    "level": "INFO",
-    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    "file_rotation": "1 day",
-    "retention": "30 days",
-}
+# === Binance ===
+BINANCE_RATE_LIMIT_SLEEP = 0.2

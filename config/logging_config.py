@@ -32,12 +32,12 @@ def setup_logging(
     """
     level = level or LOGGING["level"]
 
-    # Create logger
-    logger = logging.getLogger(name)
-    logger.setLevel(getattr(logging, level.upper()))
+    # Configure root logger with handlers (so all modules are visible)
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, level.upper()))
 
-    # Clear existing handlers
-    logger.handlers.clear()
+    # Clear existing root handlers to avoid duplicates on re-init
+    root.handlers.clear()
 
     # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
@@ -47,7 +47,7 @@ def setup_logging(
         datefmt="%H:%M:%S"
     )
     console_handler.setFormatter(console_format)
-    logger.addHandler(console_handler)
+    root.addHandler(console_handler)
 
     # File handler
     if log_file:
@@ -61,8 +61,10 @@ def setup_logging(
         file_handler.setLevel(logging.DEBUG)
         file_format = logging.Formatter(LOGGING["format"])
         file_handler.setFormatter(file_format)
-        logger.addHandler(file_handler)
+        root.addHandler(file_handler)
 
+    # Return a named logger (inherits root handlers)
+    logger = logging.getLogger(name)
     return logger
 
 
