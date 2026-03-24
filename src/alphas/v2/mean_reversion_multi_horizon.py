@@ -1,4 +1,9 @@
-"""Alpha 7: MeanReversionMultiHorizon — CLAUDE.md 섹션 4-2."""
+"""Alpha 7: MeanReversionMultiHorizon — CLAUDE.md 섹션 4-2.
+
+IC 검증 결과: 부호 반전 시 IC +0.130(1h). 크립토 시장에서
+Z-score 과매수/과매도는 평균회귀보다 추세 지속을 예측.
+→ Z 양수(과매수) = 롱 추세 지속, Z 음수(과매도) = 숏 추세 지속.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +19,7 @@ class MeanReversionMultiHorizon(BaseAlphaV2):
         super().__init__(
             name="MeanReversionMultiHorizon",
             weight=0.08,
-            category="mean_reversion",
+            category="momentum",
             required_data=["ohlcv_1d"],
         )
 
@@ -23,15 +28,15 @@ class MeanReversionMultiHorizon(BaseAlphaV2):
             return AlphaSignal()
 
         df = data.ohlcv_1d[symbol]
-        if len(df) < 121:
+        if len(df) < 61:  # std_period 최대 60
             return AlphaSignal()
 
         closes = df["close"].values
 
-        # 1. 세 가지 Z-score
-        z_short = self._zscore(closes, sma_period=3, std_period=20)
-        z_mid = self._zscore(closes, sma_period=5, std_period=60)
-        z_long = self._zscore(closes, sma_period=10, std_period=120)
+        # 1. 세 가지 Z-score (SMA/std 기간 일관성 확보)
+        z_short = self._zscore(closes, sma_period=3, std_period=5)
+        z_mid = self._zscore(closes, sma_period=10, std_period=20)
+        z_long = self._zscore(closes, sma_period=20, std_period=60)
 
         valid = [z for z in [z_short, z_mid, z_long] if z is not None]
         if not valid:
@@ -40,8 +45,8 @@ class MeanReversionMultiHorizon(BaseAlphaV2):
         # 2. 평균 Z-score
         z_avg = float(np.mean(valid))
 
-        # 3. score: Z 양수(과매수) → 숏
-        score = float(-np.tanh(z_avg / 2))
+        # 3. score: Z 양수(과매수) → 추세 지속(롱), Z 음수(과매도) → 추세 지속(숏)
+        score = float(np.tanh(z_avg / 2))
 
         # 4. 합의 보너스 — 일봉 기반(4h 갱신) → 기본 낮게
         confidence = 0.4

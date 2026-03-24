@@ -32,28 +32,31 @@ BLACKLIST = [
 ]
 
 # === Alpha Weights (합계 = 1.0) ===
-# 인트라데이 중심: 실시간/5분/1시간 데이터 알파 78%, 일봉 배경 22%
+# IC 기반 재구성 (2026-03-20):
+# - MC(IC +0.093), MR(반전 +0.130), DS(IC +0.108) → 핵심 알파로 승격
+# - MMS: IC≈0이지만 스케일 통일(*0.5 제거)로 실질 기여 2배 → 가중치 축소
+# - RSI: 부호 반전(추세추종), 반전 후 IC +0.071
+# - OB: 부호 반전(contrarian), 반전 후 IC +0.039
 ALPHA_WEIGHTS = {
-    # --- 인트라데이 (5분~1시간, 매 사이클 갱신) ---
-    "MomentumMultiScale": 0.25,        # 5분봉 멀티스케일 (핵심)
-    "IntradayVWAPV2": 0.20,            # 1시간봉 VWAP 이탈
-    "OrderbookImbalance": 0.18,        # 실시간 오더북
-    "IntradayRSIV2": 0.15,             # 1시간봉 RSI
-    # --- 배경 컨텍스트 (일봉, 4시간 갱신) ---
-    "FundingCarryEnhanced": 0.08,      # 펀딩 방향 참고
-    "MomentumComposite": 0.06,         # 20일 추세 참고
-    "MeanReversionMultiHorizon": 0.05, # 장기 z-score 참고
-    "DerivativesSentiment": 0.03,      # OI/LS 참고
+    # --- 핵심 (IC 검증됨, 높은 예측력) ---
+    "MomentumComposite": 0.20,         # IC +0.093(1h), 최고 일관성 (6→20%)
+    "FundingCarryEnhanced": 0.15,      # IC +0.044(1h), 구조적 edge (10→15%)
+    "DerivativesSentiment": 0.12,      # IC +0.108(1h), OI/LS 기반 (3→12%)
+    "MeanReversionMultiHorizon": 0.10, # 반전 후 IC +0.130(1h), 추세확인 (5→10%)
+    # --- 보조 (조건부 유효) ---
+    "IntradayRSIV2": 0.12,             # 반전 후 IC +0.071, 추세추종 (15→12%)
+    "MomentumMultiScale": 0.12,        # IC≈0 but 스케일 2배 → 축소 (30→12%)
+    "IntradayVWAPV2": 0.12,            # IC +0.012, 극단 이탈 시만 유효 (23→12%)
+    "OrderbookImbalance": 0.07,        # 반전 후 IC +0.039, contrarian (8→7%)
     # --- 비활성 ---
     "SpreadMomentum": 0.00,
     "VolatilityRegime": 0.00,
 }
 
 # === 진입 임계값 (롱/숏 비대칭) ===
-# 알파 수정(FundingCarry tanh, RSI 중립 침묵, MomComposite 5d)으로
-# 스코어 분포 ~7% 축소 반영하여 임계값 하향 조정
-LONG_ENTRY_THRESHOLD = 0.12            # 0.14→0.12 (수정 후 5.1% 비율 ≈ 수정 전 4.7%)
-SHORT_ENTRY_THRESHOLD = -0.14          # -0.16→-0.14 (수정 후 7.6%, 비대칭 유지)
+# MMS(12%)+MC(20%)=32%만 스케일 2배, 나머지 68% 동일 → 합성 ~1.3배 증가
+LONG_ENTRY_THRESHOLD = 0.16            # 0.12×1.3≈0.16
+SHORT_ENTRY_THRESHOLD = -0.18          # -0.14×1.3≈-0.18
 
 # === SL/TP (롱/숏 비대칭) ===
 LONG_SL_PCT = -0.035                   # -0.05→-0.035 (x3=-10.5%, 큰 손실 방지)
@@ -77,15 +80,15 @@ UNIVERSE_REFRESH_INTERVAL_SEC = 3600  # 1시간
 MIN_HOLD_MINUTES = 15              # 90→15 (인트라데이: 3사이클 최소 확인)
 COOLDOWN_MINUTES = 20              # 60→20 (같은 코인 재진입 쿨다운)
 SWITCH_COOLDOWN_MINUTES = 15       # 60→15
-SWITCH_SAME_DIR_GAP = 0.10         # 새 스케일 기준
-SWITCH_REVERSE_SCORE_DROP = 0.08   # 새 스케일 기준
+SWITCH_SAME_DIR_GAP = 0.13         # 스케일 통일 반영 (0.10×1.3)
+SWITCH_REVERSE_SCORE_DROP = 0.10   # 스케일 통일 반영 (0.08×1.3)
 ENTRY_CONFIRM_CYCLES = 2           # 3→2 (10분 확인, 인트라데이 속도)
 ENTRY_REQUIRE_RISING = True        # 2사이클간 스코어 상승 요구
 ENTRY_MIN_SCORE_INCREASE = 0.01    # 0.015→0.01 (2사이클이므로 완화)
 # 청산 — 점진적 시그널 감쇠 (인트라데이: 빠른 반응)
-FADE_THRESHOLD = 0.07              # 진입 임계값(0.12)의 ~58%
+FADE_THRESHOLD = 0.09              # 진입 임계값(0.16)의 ~56%
 FADE_DURATION_MIN = 15             # 30→15 (인트라데이)
-WEAK_THRESHOLD = 0.035             # 시그널 거의 소멸 (0.04→0.035 비례 조정)
+WEAK_THRESHOLD = 0.045             # 시그널 거의 소멸
 WEAK_DURATION_MIN = 10             # 15→10
 MAX_TRADES_PER_DAY = 6             # 4→6 (인트라데이 빈도 증가)
 SWITCH_MIN_HOLD_MINUTES = 30       # 120→30 (인트라데이)
@@ -102,6 +105,9 @@ STACKING_RETRAIN_INTERVAL_DAYS = 30
 
 # === 포지션 사이징 ===
 BALANCE_USAGE_RATIO = 0.95  # 잔고의 95% 사용
+
+# === 과열 필터 ===
+OVERHEAT_1H_PCT = 0.05                # 1시간 수익률 ±5% 이상이면 추격 진입 차단
 
 # === 거래량 필터 ===
 VOL_FILTER_BASELINE_BARS = 36         # 최근 3시간 (36개 5분봉) baseline

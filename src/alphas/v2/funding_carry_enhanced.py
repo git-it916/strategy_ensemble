@@ -55,13 +55,17 @@ class FundingCarryEnhanced(BaseAlphaV2):
             if oi.change_pct > 50 and abs(avg_funding) > 0.0005:
                 confidence *= 0.5
 
-        # 5. 추세 확인
+        # 5. 추세 확인 — 구조적 불일치(contrarian)일 때 신뢰도 증가
+        # 펀딩 방향 ≠ 가격 방향 = 포지션 쏠림 → carry edge 확실
+        # 펀딩 방향 = 가격 방향 = 군중 추종 → carry edge 약화
         if data.has_ohlcv_1d(symbol):
             ddf = data.ohlcv_1d[symbol]
             if len(ddf) >= 3:
                 ret_3d = (ddf["close"].iloc[-1] / ddf["close"].iloc[-3]) - 1
-                if np.sign(ret_3d) == np.sign(base_score) and abs(ret_3d) > 0.03:
-                    confidence *= 0.6
+                if np.sign(ret_3d) != np.sign(base_score) and abs(ret_3d) > 0.02:
+                    confidence = min(confidence * 1.3, 0.8)  # 구조적 불일치 → 증가
+                elif np.sign(ret_3d) == np.sign(base_score) and abs(ret_3d) > 0.03:
+                    confidence *= 0.6  # 군중 추종 → 감소
 
         base_score = float(np.clip(base_score, -1.0, 1.0))
 

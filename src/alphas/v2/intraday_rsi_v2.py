@@ -14,7 +14,7 @@ class IntradayRSIV2(BaseAlphaV2):
         super().__init__(
             name="IntradayRSIV2",
             weight=0.08,
-            category="mean_reversion",
+            category="momentum",
             required_data=["ohlcv_1h"],
         )
 
@@ -33,17 +33,18 @@ class IntradayRSIV2(BaseAlphaV2):
         if rsi is None:
             return AlphaSignal()
 
-        # 시그널 — 극단 구간에서만 발동, 중립 구간은 시그널 없음
+        # 시그널 — 추세추종 모드 (크립토: 과매수=추세 강화, 과매도=하락 지속)
+        # IC 검증: 부호 반전 시 IC +0.071(1h), 기존 방향은 IC -0.071
         if rsi > 70:
-            score = -(rsi - 70) / 30  # 70→0, 100→-1.0
+            score = (rsi - 70) / 30   # 70→0, 100→+1.0 (과매수=롱 추세 강화)
         elif rsi < 30:
-            score = (30 - rsi) / 30   # 30→0, 0→+1.0
+            score = -(30 - rsi) / 30  # 30→0, 0→-1.0 (과매도=숏 추세 강화)
         elif rsi > 60:
-            # 60~70: 약한 과매수 경고 (선형 진입)
-            score = -(rsi - 60) / 50  # 60→0, 70→-0.2
+            # 60~70: 약한 롱 시그널
+            score = (rsi - 60) / 50   # 60→0, 70→+0.2
         elif rsi < 40:
-            # 30~40: 약한 과매도 경고 (선형 진입)
-            score = (40 - rsi) / 50   # 40→0, 30→+0.2
+            # 30~40: 약한 숏 시그널
+            score = -(40 - rsi) / 50  # 40→0, 30→-0.2
         else:
             # 40~60: 중립 → 시그널 없음
             score = 0.0

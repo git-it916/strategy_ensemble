@@ -1,4 +1,11 @@
-"""Alpha 8: OrderbookImbalance — CLAUDE.md 섹션 4-2."""
+"""Alpha 8: OrderbookImbalance — CLAUDE.md 섹션 4-2.
+
+Contrarian 방식 (IC 검증: 부호 반전 시 IC 양수):
+  - bid 과잉(imb > 0) → 대형 매수벽 뒤 매도 예상 → 숏 시그널
+  - ask 과잉(imb < 0) → 대형 매도벽 뒤 매수 예상 → 롱 시그널
+  + 일관성 확인: 최근 5개 스냅샷 방향 일관시만 발동
+  + 모멘텀 확인: 가격 방향과 반대일 때만 발동 (역추세 확인)
+"""
 
 from __future__ import annotations
 
@@ -10,75 +17,103 @@ from src.data.data_bundle import DataBundle
 
 class OrderbookImbalance(BaseAlphaV2):
 
-    _EMA_ALPHA = 0.5  # 노이즈 감쇠용 (stddev 0.211 → ~0.10)
-
     def __init__(self):
         super().__init__(
             name="OrderbookImbalance",
-            weight=0.05,
-            category="micro",
-            required_data=["orderbook_snapshots"],
+            weight=0.08,
+            category="contrarian",
+            required_data=["orderbook_snapshots", "ohlcv_5m"],
         )
-        self._prev_scores: dict[str, float] = {}  # 심볼별 EMA 상태
+        self._prev_scores: dict[str, float] = {}
 
     async def compute(self, symbol: str, data: DataBundle) -> AlphaSignal:
         if not data.has_orderbook(symbol):
             return AlphaSignal()
 
         snapshots = data.orderbook_snapshots[symbol]
-        if not snapshots:
+        if len(snapshots) < 3:
             return AlphaSignal()
 
-        # 최신 스냅샷 기준
+        # ── 1. 현재 불균형 ──
         latest = snapshots[-1]
-        bids = latest.bids
-        asks = latest.asks
-
-        if not bids or not asks:
+        if not latest.bids or not latest.asks:
             return AlphaSignal()
 
-        # 1. 3구간 불균형
-        imb_near = self._bucket_imbalance(bids, asks, 0, 5)
-        imb_mid = self._bucket_imbalance(bids, asks, 5, 10)
-        imb_far = self._bucket_imbalance(bids, asks, 10, 20)
+        imb_near = self._bucket_imbalance(latest.bids, latest.asks, 0, 5)
+        imb_mid = self._bucket_imbalance(latest.bids, latest.asks, 5, 10)
+        imb_far = self._bucket_imbalance(latest.bids, latest.asks, 10, 20)
+        current_raw = 0.5 * imb_near + 0.3 * imb_mid + 0.2 * imb_far
 
-        raw = 0.5 * imb_near + 0.3 * imb_mid + 0.2 * imb_far
+        # ── 2. 일관성 체크: 최근 5개 스냅샷 방향 ──
+        recent_snaps = snapshots[-5:]
+        directions = []
+        for snap in recent_snaps:
+            if snap.bids and snap.asks:
+                n = self._bucket_imbalance(snap.bids, snap.asks, 0, 5)
+                m = self._bucket_imbalance(snap.bids, snap.asks, 5, 10)
+                f = self._bucket_imbalance(snap.bids, snap.asks, 10, 20)
+                snap_raw = 0.5 * n + 0.3 * m + 0.2 * f
+                directions.append(np.sign(snap_raw))
 
-        # 2. 히스토리 지수 가중 평균 (최신에 높은 가중)
-        if len(snapshots) >= 3:
-            # 최근 5개만 사용 (5분 히스토리), 지수 가중
-            recent_snaps = snapshots[-5:]
-            ema_raw = None
-            decay = 0.6  # 이전 값 40% 유지
-            for snap in recent_snaps:
-                if snap.bids and snap.asks:
-                    n = self._bucket_imbalance(snap.bids, snap.asks, 0, 5)
-                    m = self._bucket_imbalance(snap.bids, snap.asks, 5, 10)
-                    f = self._bucket_imbalance(snap.bids, snap.asks, 10, 20)
-                    snap_raw = 0.5 * n + 0.3 * m + 0.2 * f
-                    if ema_raw is None:
-                        ema_raw = snap_raw
-                    else:
-                        ema_raw = (1 - decay) * ema_raw + decay * snap_raw
-            if ema_raw is not None:
-                raw = ema_raw
+        # 방향 일관성: 최근 스냅샷 중 같은 방향 비율
+        if len(directions) >= 3:
+            dominant_dir = np.sign(current_raw)
+            agree_count = sum(1 for d in directions if d == dominant_dir)
+            consistency = agree_count / len(directions)  # 0.0 ~ 1.0
+        else:
+            consistency = 0.0
 
-        # 3. score — EMA 스무딩은 히스토리에서 이미 처리, 이중 스무딩 제거
-        score = float(np.tanh(raw * 3))
+        # 일관성 60% 미만이면 침묵 (방향이 왔다갔다)
+        if consistency < 0.6:
+            self._prev_scores[symbol] = 0.0
+            return AlphaSignal(
+                score=0.0, confidence=0.0,
+                metadata={"imb_near": imb_near, "imb_mid": imb_mid,
+                          "imb_far": imb_far, "consistency": consistency},
+            )
 
-        # 심볼별 EMA — 사이클 간 급변동만 감쇠 (가벼운 스무딩)
+        # ── 3. 모멘텀 확인: contrarian — 가격 방향과 OB 불균형이 같을 때만 ──
+        # bid 과잉 + 가격 상승 중 = 매수벽 뒤에서 대량 매도 준비 → 숏 시그널
+        price_momentum = 0.0
+        if data.has_ohlcv_5m(symbol):
+            df5 = data.ohlcv_5m[symbol]
+            if len(df5) >= 7:
+                closes = df5["close"].values
+                price_momentum = (closes[-1] / closes[-7]) - 1 if closes[-7] != 0 else 0
+
+        ob_direction = np.sign(current_raw)
+        mom_direction = np.sign(price_momentum)
+
+        # contrarian: OB와 모멘텀이 같은 방향(과열)일 때만 반전 시그널
+        # 모멘텀 중립이거나 OB와 반대면 침묵
+        if abs(price_momentum) < 0.002 or (mom_direction != 0 and ob_direction != mom_direction):
+            self._prev_scores[symbol] = 0.0
+            return AlphaSignal(
+                score=0.0, confidence=0.0,
+                metadata={"imb_near": imb_near, "imb_mid": imb_mid,
+                          "imb_far": imb_far, "consistency": consistency,
+                          "price_mom": price_momentum},
+            )
+
+        # ── 4. 스코어 계산 (부호 반전: bid 과잉 → 숏) ──
+        score = float(-np.tanh(current_raw * 2))  # contrarian: 반전
+
+        # 사이클 간 EMA
         prev = self._prev_scores.get(symbol, score)
-        smoothed = 0.7 * score + 0.3 * prev  # 새 값 70%, 이전 30%
+        smoothed = 0.7 * score + 0.3 * prev
         self._prev_scores[symbol] = smoothed
 
-        # confidence: 불균형 크기에 비례 (노이즈 많은 데이터 → 강한 신호만 신뢰)
-        confidence = min(abs(smoothed) * 1.5, 0.7)
-        confidence = max(confidence, 0.2)
+        # confidence: 일관성 × 불균형 크기 (상한 0.6)
+        confidence = consistency * min(abs(smoothed), 0.8)
+        confidence = min(confidence, 0.6)
+        confidence = max(confidence, 0.1)
 
         return AlphaSignal(
             score=smoothed,
             confidence=confidence,
-            metadata={"imb_near": imb_near, "imb_mid": imb_mid, "imb_far": imb_far, "raw": score},
+            metadata={"imb_near": imb_near, "imb_mid": imb_mid,
+                      "imb_far": imb_far, "consistency": consistency,
+                      "price_mom": price_momentum},
         )
 
     @staticmethod

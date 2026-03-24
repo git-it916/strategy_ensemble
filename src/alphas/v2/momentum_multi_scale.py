@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from config.settings import VOL_FILTER_BASELINE_BARS
 from src.alphas.base_alpha_v2 import AlphaSignal, BaseAlphaV2
 from src.data.data_bundle import DataBundle
 
@@ -49,13 +50,14 @@ class MomentumMultiScale(BaseAlphaV2):
                 vol_5d = float(np.std(daily_rets, ddof=1)) if len(daily_rets) > 1 else 0.03
         vol_5d = max(vol_5d, 0.001)
 
-        score = float(np.tanh(weighted_return / vol_5d)) * 0.5  # 스케일 정규화
+        score = float(np.tanh(weighted_return / vol_5d))  # [-1, 1] 통일 스케일
 
         # 3. 거래량 확인
         confidence = 0.8
-        if len(volumes) >= 60:
+        if len(volumes) >= 12:
             recent_vol = float(np.mean(volumes[-6:]))
-            baseline_vol = float(np.mean(volumes))
+            baseline_window = min(len(volumes), VOL_FILTER_BASELINE_BARS)
+            baseline_vol = float(np.mean(volumes[-baseline_window:]))
             if baseline_vol > 0:
                 vol_ratio = recent_vol / baseline_vol
                 if vol_ratio < 0.5:
@@ -63,10 +65,10 @@ class MomentumMultiScale(BaseAlphaV2):
                 elif vol_ratio > 2.0:
                     confidence = min(confidence * 1.2, 1.0)
 
-        # 4. 가속도
+        # 4. 가속도 보너스
         accel = ret_30m - ret_90m
         if np.sign(accel) == np.sign(score):
-            score += 0.1 * accel
+            score += 0.15 * accel
 
         score = float(np.clip(score, -1.0, 1.0))
 

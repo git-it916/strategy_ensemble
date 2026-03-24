@@ -28,6 +28,7 @@ from config.settings import (
     MAX_SAME_SYMBOL_LOSSES,
     MAX_TRADES_PER_DAY,
     MIN_HOLD_MINUTES,
+    OVERHEAT_1H_PCT,
     SAME_SYMBOL_BAN_HOURS,
     SHORT_ENTRY_THRESHOLD,
     SHORT_SL_PCT,
@@ -164,13 +165,13 @@ class DecisionEngine:
         # === 필터 적용 ===
         filtered = []
         for sym, sc, direction in all_candidates:
-            # 필터 1: 과열 방지 — 이미 3% 이상 움직인 코인 제외
+            # 필터 1: 과열 방지 — 이미 큰 폭 움직인 코인 제외
             coin_1h = coin_1h_rets.get(sym, 0)
-            if direction == "LONG" and coin_1h > 0.03:
+            if direction == "LONG" and coin_1h > OVERHEAT_1H_PCT:
                 logger.info(f"FILTER: {sym.split('/')[0]} LONG blocked — already +{coin_1h:.1%} in 1h")
                 _log_filter(sym, direction, sc, "OVERHEAT", f"1h_ret={coin_1h:+.1%}")
                 continue
-            if direction == "SHORT" and coin_1h < -0.03:
+            if direction == "SHORT" and coin_1h < -OVERHEAT_1H_PCT:
                 logger.info(f"FILTER: {sym.split('/')[0]} SHORT blocked — already {coin_1h:.1%} in 1h")
                 _log_filter(sym, direction, sc, "OVERHEAT", f"1h_ret={coin_1h:+.1%}")
                 continue

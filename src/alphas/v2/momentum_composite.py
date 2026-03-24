@@ -61,8 +61,8 @@ class MomentumComposite(BaseAlphaV2):
         else:
             mom_5d = 0.0
 
-        # 4. 합산 (×0.5 스케일 정규화 — 다른 알파와 magnitude 맞춤)
-        score = (0.4 * abs_mom + 0.3 * rank_score + 0.3 * mom_5d) * 0.5
+        # 4. 합산 ([-1,1] 통일 스케일)
+        score = 0.4 * abs_mom + 0.3 * rank_score + 0.3 * mom_5d
         score = float(np.clip(score, -1.0, 1.0))
 
         # confidence: 일봉 기반(4h 갱신) → 기본 낮게, 구성요소 합의시 올림
