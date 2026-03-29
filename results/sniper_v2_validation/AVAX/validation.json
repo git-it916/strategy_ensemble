@@ -1,0 +1,38 @@
+{
+  "symbol": "AVAX",
+  "strategy": "EMA 12/50/200",
+  "sl": "SWING_5",
+  "params": {
+    "ema": "12/50/200",
+    "rsi": "65/35",
+    "tp_rr": "2.0/3.5/6.0",
+    "adx_min": 30,
+    "profit_protect": false
+  },
+  "is_period": "2021-04-24 ~ 2025-03-22",
+  "oos_period": "2025-03-29 ~ 2026-03-29",
+  "is_metrics": {
+    "n_trades": 138,
+    "win_rate": 0.26811594202898553,
+    "pf": 2.093,
+    "total_pnl_pct": 450.7,
+    "sharpe": 0.86,
+    "max_dd_pct": -91.01,
+    "calmar": 0.601,
+    "avg_pnl_pct": 6.325
+  },
+  "oos_metrics": {
+    "n_trades": 44,
+    "win_rate": 0.36363636363636365,
+    "pf": 1.963,
+    "total_pnl_pct": 227.69,
+    "sharpe": 3.284,
+    "max_dd_pct": -60.89,
+    "calmar": 3.739,
+    "avg_pnl_pct": 4.458
+  },
+  "verdict": "PASS",
+  "reasons": [
+    "IS/OOS 성과 일관"
+  ]
+}

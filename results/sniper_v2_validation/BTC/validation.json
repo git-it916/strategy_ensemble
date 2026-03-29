@@ -1,0 +1,38 @@
+{
+  "symbol": "BTC",
+  "strategy": "EMA 20/50/200",
+  "sl": "SWING_15",
+  "params": {
+    "ema": "20/50/200",
+    "rsi": "60/40",
+    "tp_rr": "1.5/2.5/4.0",
+    "adx_min": 0,
+    "profit_protect": true
+  },
+  "is_period": "2021-04-24 ~ 2025-03-22",
+  "oos_period": "2025-03-29 ~ 2026-03-29",
+  "is_metrics": {
+    "n_trades": 524,
+    "win_rate": 0.3568702290076336,
+    "pf": 1.014,
+    "total_pnl_pct": -85.96,
+    "sharpe": 0.032,
+    "max_dd_pct": -98.61,
+    "calmar": -0.4,
+    "avg_pnl_pct": 0.039
+  },
+  "oos_metrics": {
+    "n_trades": 132,
+    "win_rate": 0.4015151515151515,
+    "pf": 1.409,
+    "total_pnl_pct": 98.54,
+    "sharpe": 1.595,
+    "max_dd_pct": -56.69,
+    "calmar": 1.738,
+    "avg_pnl_pct": 0.786
+  },
+  "verdict": "PASS",
+  "reasons": [
+    "IS/OOS 성과 일관"
+  ]
+}

@@ -1,19 +1,3 @@
 """
-Execution Module
-
-Order execution and trading infrastructure (Binance USDT-M Futures).
+Execution Module — time_sync only (sniper_v2용).
 """
-
-from .binance_api import BinanceApi
-from .binance_websocket import BinanceWebSocket
-from .candle import CandleAggregator, RealtimeTick, CandleBar
-from .telegram_bot import TelegramNotifier
-
-__all__ = [
-    "BinanceApi",
-    "BinanceWebSocket",
-    "CandleAggregator",
-    "RealtimeTick",
-    "CandleBar",
-    "TelegramNotifier",
-]

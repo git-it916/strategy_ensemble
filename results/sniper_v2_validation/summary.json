@@ -1,0 +1,154 @@
+[
+  {
+    "symbol": "BTC",
+    "strategy": "EMA 20/50/200",
+    "sl": "SWING_15",
+    "params": {
+      "ema": "20/50/200",
+      "rsi": "60/40",
+      "tp_rr": "1.5/2.5/4.0",
+      "adx_min": 0,
+      "profit_protect": true
+    },
+    "is_period": "2021-04-24 ~ 2025-03-22",
+    "oos_period": "2025-03-29 ~ 2026-03-29",
+    "is_metrics": {
+      "n_trades": 524,
+      "win_rate": 0.3568702290076336,
+      "pf": 1.014,
+      "total_pnl_pct": -85.96,
+      "sharpe": 0.032,
+      "max_dd_pct": -98.61,
+      "calmar": -0.4,
+      "avg_pnl_pct": 0.039
+    },
+    "oos_metrics": {
+      "n_trades": 132,
+      "win_rate": 0.4015151515151515,
+      "pf": 1.409,
+      "total_pnl_pct": 98.54,
+      "sharpe": 1.595,
+      "max_dd_pct": -56.69,
+      "calmar": 1.738,
+      "avg_pnl_pct": 0.786
+    },
+    "verdict": "PASS",
+    "reasons": [
+      "IS/OOS 성과 일관"
+    ]
+  },
+  {
+    "symbol": "SOL",
+    "strategy": "EMA 8/40/150",
+    "sl": "SWING_3",
+    "params": {
+      "ema": "8/40/150",
+      "rsi": "65/35",
+      "tp_rr": "1.25/3.38/5.5",
+      "adx_min": 30,
+      "profit_protect": false
+    },
+    "is_period": "2021-04-24 ~ 2025-03-22",
+    "oos_period": "2025-03-29 ~ 2026-03-29",
+    "is_metrics": {
+      "n_trades": 92,
+      "win_rate": 0.17391304347826086,
+      "pf": 2.193,
+      "total_pnl_pct": -56.87,
+      "sharpe": 0.749,
+      "max_dd_pct": -84.68,
+      "calmar": -0.229,
+      "avg_pnl_pct": 7.605
+    },
+    "oos_metrics": {
+      "n_trades": 31,
+      "win_rate": 0.2903225806451613,
+      "pf": 2.188,
+      "total_pnl_pct": 104.98,
+      "sharpe": 2.848,
+      "max_dd_pct": -28.64,
+      "calmar": 3.665,
+      "avg_pnl_pct": 3.936
+    },
+    "verdict": "PASS",
+    "reasons": [
+      "IS/OOS 성과 일관"
+    ]
+  },
+  {
+    "symbol": "XRP",
+    "strategy": "FundingContrarian",
+    "sl": "ATR×2.0",
+    "params": {
+      "ema": "N/A",
+      "rsi": "70/30",
+      "tp_rr": "2.0/3.5/6.0",
+      "adx_min": 0,
+      "profit_protect": false
+    },
+    "is_period": "2021-04-24 ~ 2025-03-22",
+    "oos_period": "2025-03-29 ~ 2026-03-29",
+    "is_metrics": {
+      "n_trades": 52,
+      "win_rate": 0.25,
+      "pf": 1.029,
+      "total_pnl_pct": -28.85,
+      "sharpe": 0.083,
+      "max_dd_pct": -60.84,
+      "calmar": -0.137,
+      "avg_pnl_pct": 0.136
+    },
+    "oos_metrics": {
+      "n_trades": 30,
+      "win_rate": 0.36666666666666664,
+      "pf": 3.864,
+      "total_pnl_pct": 308.86,
+      "sharpe": 3.699,
+      "max_dd_pct": -20.71,
+      "calmar": 14.911,
+      "avg_pnl_pct": 7.63
+    },
+    "verdict": "PASS",
+    "reasons": [
+      "IS/OOS 성과 일관"
+    ]
+  },
+  {
+    "symbol": "AVAX",
+    "strategy": "EMA 12/50/200",
+    "sl": "SWING_5",
+    "params": {
+      "ema": "12/50/200",
+      "rsi": "65/35",
+      "tp_rr": "2.0/3.5/6.0",
+      "adx_min": 30,
+      "profit_protect": false
+    },
+    "is_period": "2021-04-24 ~ 2025-03-22",
+    "oos_period": "2025-03-29 ~ 2026-03-29",
+    "is_metrics": {
+      "n_trades": 138,
+      "win_rate": 0.26811594202898553,
+      "pf": 2.093,
+      "total_pnl_pct": 450.7,
+      "sharpe": 0.86,
+      "max_dd_pct": -91.01,
+      "calmar": 0.601,
+      "avg_pnl_pct": 6.325
+    },
+    "oos_metrics": {
+      "n_trades": 44,
+      "win_rate": 0.36363636363636365,
+      "pf": 1.963,
+      "total_pnl_pct": 227.69,
+      "sharpe": 3.284,
+      "max_dd_pct": -60.89,
+      "calmar": 3.739,
+      "avg_pnl_pct": 4.458
+    },
+    "verdict": "PASS",
+    "reasons": [
+      "IS/OOS 성과 일관"
+    ]
+  }
+]

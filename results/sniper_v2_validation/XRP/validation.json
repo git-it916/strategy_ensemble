@@ -1,0 +1,38 @@
+{
+  "symbol": "XRP",
+  "strategy": "FundingContrarian",
+  "sl": "ATR×2.0",
+  "params": {
+    "ema": "N/A",
+    "rsi": "70/30",
+    "tp_rr": "2.0/3.5/6.0",
+    "adx_min": 0,
+    "profit_protect": false
+  },
+  "is_period": "2021-04-24 ~ 2025-03-22",
+  "oos_period": "2025-03-29 ~ 2026-03-29",
+  "is_metrics": {
+    "n_trades": 52,
+    "win_rate": 0.25,
+    "pf": 1.029,
+    "total_pnl_pct": -28.85,
+    "sharpe": 0.083,
+    "max_dd_pct": -60.84,
+    "calmar": -0.137,
+    "avg_pnl_pct": 0.136
+  },
+  "oos_metrics": {
+    "n_trades": 30,
+    "win_rate": 0.36666666666666664,
+    "pf": 3.864,
+    "total_pnl_pct": 308.86,
+    "sharpe": 3.699,
+    "max_dd_pct": -20.71,
+    "calmar": 14.911,
+    "avg_pnl_pct": 7.63
+  },
+  "verdict": "PASS",
+  "reasons": [
+    "IS/OOS 성과 일관"
+  ]
+}

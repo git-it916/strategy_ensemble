@@ -17,7 +17,17 @@
       "Bash(python:*)",
       "Bash(du:*)",
       "Bash(python3:*)",
-      "Bash(find src/engine src/alphas/v2 config/settings.py scripts/backtest_sim.py -name *.py -newer .git/index)"
+      "Bash(find src/engine src/alphas/v2 config/settings.py scripts/backtest_sim.py -name *.py -newer .git/index)",
+      "Bash(cat /tmp/claude-1000/-home-seunghun-shin-strategy-ensemble/*/tasks/bn0llgcha.output)",
+      "Bash(wc -l /tmp/claude-1000/-home-seunghun-shin-strategy-ensemble/*/tasks/bn0llgcha.output)",
+      "Bash(tail -10 /tmp/claude-1000/-home-seunghun-shin-strategy-ensemble/*/tasks/bn0llgcha.output)",
+      "Bash(tail -f /tmp/claude-1000/-home-seunghun-shin-strategy-ensemble/*/tasks/bn0llgcha.output)",
+      "Bash(grep -r \"class.*Monitor\\\\|def run\\\\|def main\" /home/seunghun_shin/strategy_ensemble/src/daemon/*.py)",
+      "Bash(crontab -l)",
+      "Bash(find /home/seunghun_shin/strategy_ensemble/src/sniper -type f -name *.py)",
+      "Bash(cat /tmp/claude-1000/-home-seunghun-shin-strategy-ensemble/*/tasks/bxzg6cmxc.output)",
+      "Bash(source ~/miniconda3/etc/profile.d/conda.sh)",
+      "Bash(conda activate:*)"
     ]
   }
 }
